@@ -1,0 +1,27 @@
+name: Build ClipboardQueue
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish
+        run: dotnet publish ClipboardQueue/ClipboardQueue.csproj -c Release -r win-x64 --self-contained true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipboardQueue-win-x64
+          path: ClipboardQueue/bin/Release/net8.0-windows/win-x64/publish/ClipboardQueue.exe
