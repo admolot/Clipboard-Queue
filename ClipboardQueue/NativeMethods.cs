@@ -9,13 +9,12 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool AddClipboardFormatListener(IntPtr hwnd);
-    
-    [DllImport("user32.dll")]
-    public static extern uint GetClipboardSequenceNumber();
-
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
 
     public const int WH_KEYBOARD_LL = 13;
 
