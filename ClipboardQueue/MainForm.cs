@@ -31,10 +31,9 @@ public sealed class MainForm : Form
 
     private KeyboardHook? _keyboardHook;
     private SynchronizationContext? _uiContext;
-    
+
     private System.Windows.Forms.Timer? _clipboardTimer;
     private uint _lastClipboardSequence;
-
 
     private bool _exitRequested;
     private bool _cleanedUp;
@@ -117,6 +116,13 @@ public sealed class MainForm : Form
         };
         clearAllButton.Click += (_, _) => ClearAll();
 
+        var minimizeToTrayButton = new Button
+        {
+            Text = "Minimize to tray",
+            AutoSize = true
+        };
+        minimizeToTrayButton.Click += (_, _) => HideQueueWindow();
+
         _pauseCheckBox = new CheckBox
         {
             Text = "Pause monitoring",
@@ -144,6 +150,7 @@ public sealed class MainForm : Form
         buttonPanel.Controls.Add(pasteAllButton);
         buttonPanel.Controls.Add(deleteSelectedButton);
         buttonPanel.Controls.Add(clearAllButton);
+        buttonPanel.Controls.Add(minimizeToTrayButton);
         buttonPanel.Controls.Add(_pauseCheckBox);
         buttonPanel.Controls.Add(_startupCheckBox);
         buttonPanel.Controls.Add(_countLabel);
@@ -181,6 +188,9 @@ public sealed class MainForm : Form
         var clearMenuItem = new ToolStripMenuItem("Clear all");
         clearMenuItem.Click += (_, _) => ClearAll();
 
+        var minimizeToTrayItem = new ToolStripMenuItem("Minimize to tray");
+        minimizeToTrayItem.Click += (_, _) => HideQueueWindow();
+
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (_, _) => ExitApplication();
 
@@ -192,6 +202,7 @@ public sealed class MainForm : Form
         trayMenu.Items.Add(_pauseMenuItem);
         trayMenu.Items.Add(_startupMenuItem);
         trayMenu.Items.Add(clearMenuItem);
+        trayMenu.Items.Add(minimizeToTrayItem);
         trayMenu.Items.Add(new ToolStripSeparator());
         trayMenu.Items.Add(exitItem);
 
@@ -213,16 +224,16 @@ public sealed class MainForm : Form
         _uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
 
         NativeMethods.AddClipboardFormatListener(Handle);
+
         _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-        
-       _clipboardTimer = new System.Windows.Forms.Timer
-{
-    Interval = 400
-};
 
-_clipboardTimer.Tick += (_, _) => OnClipboardUpdate();
-_clipboardTimer.Start();
+        _clipboardTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 400
+        };
 
+        _clipboardTimer.Tick += (_, _) => OnClipboardUpdate();
+        _clipboardTimer.Start();
 
         try
         {
@@ -261,12 +272,23 @@ _clipboardTimer.Start();
         base.WndProc(ref m);
     }
 
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+
+        if (WindowState == FormWindowState.Minimized)
+        {
+            HideQueueWindow();
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!_exitRequested && e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
             HideQueueWindow();
+            base.OnFormClosing(e);
             return;
         }
 
@@ -340,20 +362,32 @@ _clipboardTimer.Start();
 
     private void OnClipboardUpdate()
     {
-        if (_pauseMonitoring)
-            return;
-
         try
         {
+            uint current = NativeMethods.GetClipboardSequenceNumber();
+
+            if (_pauseMonitoring)
+            {
+                _lastClipboardSequence = current;
+                return;
+            }
+
+            if (current == _lastClipboardSequence)
+                return;
+
             if (!Clipboard.ContainsText())
                 return;
 
             string text = Clipboard.GetText();
+
+            _lastClipboardSequence = current;
+
             AddClipboardText(text);
         }
         catch
         {
-            // Clipboard can be locked by another app.
+            // Clipboard may be locked by another application.
+            // The timer will try again shortly.
         }
     }
 
@@ -523,11 +557,12 @@ _clipboardTimer.Start();
             // Rich-text paste where supported.
             data.SetData(DataFormats.Html, htmlClipboardData);
 
-            _lastProgrammaticClipboardText = markdown;
-            _lastProgrammaticClipboardTime = DateTime.UtcNow;
-
             if (!await TrySetClipboardAsync(data))
                 return;
+
+            _lastProgrammaticClipboardText = markdown;
+            _lastProgrammaticClipboardTime = DateTime.UtcNow;
+            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
             // Small delay helps some apps accept the clipboard change.
             await Task.Delay(150);
@@ -576,6 +611,15 @@ _clipboardTimer.Start();
         {
             if (IsHandleCreated)
                 NativeMethods.RemoveClipboardFormatListener(Handle);
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            _clipboardTimer?.Stop();
+            _clipboardTimer?.Dispose();
         }
         catch
         {
