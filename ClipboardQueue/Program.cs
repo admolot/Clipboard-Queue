@@ -12,7 +12,10 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
 
-        using var mutex = new Mutex(true, @"Local\ClipboardQueue_SingleInstance", out bool createdNew);
+        using var mutex = new Mutex(
+            true,
+            @"Local\ClipboardQueue_SingleInstance",
+            out bool createdNew);
 
         if (!createdNew)
         {
