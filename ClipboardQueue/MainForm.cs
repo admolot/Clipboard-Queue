@@ -213,6 +213,16 @@ public sealed class MainForm : Form
         _uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
 
         NativeMethods.AddClipboardFormatListener(Handle);
+        _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+        
+       _clipboardTimer = new System.Windows.Forms.Timer
+{
+    Interval = 400
+};
+
+_clipboardTimer.Tick += (_, _) => OnClipboardUpdate();
+_clipboardTimer.Start();
+
 
         try
         {
