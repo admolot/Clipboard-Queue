@@ -31,6 +31,10 @@ public sealed class MainForm : Form
 
     private KeyboardHook? _keyboardHook;
     private SynchronizationContext? _uiContext;
+    
+    private System.Windows.Forms.Timer? _clipboardTimer;
+    private uint _lastClipboardSequence;
+
 
     private bool _exitRequested;
     private bool _cleanedUp;
