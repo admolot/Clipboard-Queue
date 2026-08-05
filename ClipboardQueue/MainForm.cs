@@ -97,7 +97,7 @@ public sealed class MainForm : Form
 
         var pasteAllButton = new Button
         {
-            Text = "Paste all (Ctrl+Alt+V)",
+            Text = "Paste all (Ctrl+Alt+V or Ctrl+V + right mouse)",
             AutoSize = true
         };
         pasteAllButton.Click += (_, _) => PasteAll();
@@ -549,15 +549,19 @@ public sealed class MainForm : Form
 
             string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(html);
 
-            var data = new DataObject();
+            // Preferred: native clipboard write with guaranteed UTF-8 CF_HTML.
+            bool clipboardSet = NativeClipboard.TrySetHtmlAndText(markdown, htmlClipboardData);
 
-            // Plain-text fallback is the original Markdown text.
-            data.SetData(DataFormats.UnicodeText, markdown);
+            if (!clipboardSet)
+            {
+                // Fallback: managed WinForms clipboard.
+                var data = new DataObject();
+                data.SetData(DataFormats.UnicodeText, markdown);
+                data.SetData(DataFormats.Html, htmlClipboardData);
+                clipboardSet = await TrySetClipboardAsync(data);
+            }
 
-            // Rich-text paste where supported.
-            data.SetData(DataFormats.Html, htmlClipboardData);
-
-            if (!await TrySetClipboardAsync(data))
+            if (!clipboardSet)
                 return;
 
             _lastProgrammaticClipboardText = markdown;
@@ -565,7 +569,11 @@ public sealed class MainForm : Form
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
             // Small delay helps some apps accept the clipboard change.
-            await Task.Delay(150);
+            await Task.Delay(100);
+
+            // Wait until the user has physically released Ctrl/Alt/Shift,
+            // otherwise the simulated Ctrl+V could become Ctrl+Alt+V.
+            NativeMethods.WaitForModifierKeysRelease();
 
             NativeMethods.SendCtrlV();
         }
