@@ -64,6 +64,7 @@ public sealed class MainForm : Form
 
     private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
         .UseAdvancedExtensions()
+        .UseSoftlineBreakAsHardlineBreak()
         .Build();
 
     public MainForm(bool startHidden)
@@ -71,7 +72,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.3";
+        Text = "Clipboard Queue 1.4";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -396,6 +397,15 @@ public sealed class MainForm : Form
             if (!Clipboard.ContainsText())
                 return;
 
+            // If the clipboard also contains an image or files (e.g. a copied
+            // picture), do NOT store the text/path. The user should be able to
+            // paste the real image/file with a normal Ctrl+V.
+            if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList())
+            {
+                _lastClipboardSequence = current;
+                return;
+            }
+
             string text = Clipboard.GetText();
 
             // Also capture the rich HTML that the source app (e.g. browser)
@@ -570,6 +580,8 @@ public sealed class MainForm : Form
             ? Environment.NewLine + Environment.NewLine
             : _settings.PasteAllSeparator;
 
+        bool renderMarkdown = _settings.RenderMarkdownForPlainText;
+
         // Build combined text + combined HTML in the background.
         var combined = await Task.Run(() =>
         {
@@ -584,7 +596,9 @@ public sealed class MainForm : Form
 
                 htmlBuilder.Append(
                     string.IsNullOrWhiteSpace(item.Html)
-                        ? Markdown.ToHtml(item.Text, MarkdownPipeline)
+                        ? (renderMarkdown
+                            ? Markdown.ToHtml(item.Text, MarkdownPipeline)
+                            : HtmlClipboardHelper.PlainTextToHtml(item.Text))
                         : item.Html);
 
                 if (i < items.Length - 1)
@@ -608,10 +622,18 @@ public sealed class MainForm : Form
         {
             string htmlToUse = html ?? string.Empty;
 
-            // No stored HTML (e.g. copied from Notepad): render Markdown.
+            // No stored HTML (e.g. copied from Notepad):
+            // by default paste exactly as-is (preserving line breaks),
+            // or render Markdown if enabled in settings.
             if (string.IsNullOrWhiteSpace(htmlToUse))
             {
-                htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
+                bool renderMarkdown = _settings.RenderMarkdownForPlainText;
+                string textCopy = text;
+
+                htmlToUse = await Task.Run(() =>
+                    renderMarkdown
+                        ? Markdown.ToHtml(textCopy, MarkdownPipeline)
+                        : HtmlClipboardHelper.PlainTextToHtml(textCopy));
             }
 
             string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
@@ -638,8 +660,8 @@ public sealed class MainForm : Form
             // Small delay helps some apps accept the clipboard change.
             await Task.Delay(100);
 
-            // Wait until the user has physically released Ctrl/Alt/Shift,
-            // otherwise the simulated Ctrl+V could become Ctrl+Alt+V.
+            // Wait until the user has physically released keys and mouse buttons,
+            // otherwise the simulated Ctrl+V could be swallowed.
             NativeMethods.WaitForModifierKeysRelease();
 
             NativeMethods.SendCtrlV();
