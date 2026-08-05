@@ -11,6 +11,10 @@ public sealed class AppSettings
     // If true, Ctrl+V pastes the oldest queued item whenever the queue is not empty.
     // If false, Ctrl+V is left alone for normal Windows paste.
     public bool OverrideCtrlV { get; set; } = true;
+
+    // If true, plain-text copies (no HTML on clipboard) are rendered as Markdown.
+    // If false (default), they are pasted exactly as-is, preserving all line breaks.
+    public bool RenderMarkdownForPlainText { get; set; } = false;
 }
 
 public static class SettingsManager
@@ -25,8 +29,7 @@ public static class SettingsManager
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ClipboardQueue");
 
-    private static string SettingsPath =>
-        Path.Combine(SettingsDirectory, "settings.json");
+    private static string SettingsPath => Path.Combine(SettingsDirectory, "settings.json");
 
     public static AppSettings Load()
     {
