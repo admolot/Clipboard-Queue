@@ -606,7 +606,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            string htmlToUse = html;
+            string htmlToUse = html ?? string.Empty;
 
             // No stored HTML (e.g. copied from Notepad): render Markdown.
             if (string.IsNullOrWhiteSpace(htmlToUse))
