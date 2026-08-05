@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 using System.Text;
 
@@ -37,5 +38,58 @@ public static class HtmlClipboardHelper
             endFragmentOffset);
 
         return header + startHtml + startFragmentTag + htmlFragment + endFragmentTag + endHtml;
+    }
+
+    /// <summary>
+    /// Extracts the HTML fragment from a raw CF_HTML ("HTML Format") string,
+    /// e.g. the HTML that a browser puts on the clipboard.
+    /// Returns null if the header cannot be parsed.
+    /// </summary>
+    public static string? ExtractFragment(string cfHtml)
+    {
+        if (string.IsNullOrEmpty(cfHtml))
+            return null;
+
+        int start = ParseOffset(cfHtml, "StartFragment:");
+        int end = ParseOffset(cfHtml, "EndFragment:");
+
+        if (start < 0 || end < 0 || end <= start)
+            return null;
+
+        try
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(cfHtml);
+
+            if (end > bytes.Length)
+                return null;
+
+            return Encoding.UTF8.GetString(bytes, start, end - start);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int ParseOffset(string cfHtml, string key)
+    {
+        int index = cfHtml.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+
+        if (index < 0)
+            return -1;
+
+        index += key.Length;
+
+        int value = 0;
+        bool any = false;
+
+        while (index < cfHtml.Length && char.IsDigit(cfHtml[index]))
+        {
+            value = value * 10 + (cfHtml[index] - '0');
+            any = true;
+            index++;
+        }
+
+        return any ? value : -1;
     }
 }
