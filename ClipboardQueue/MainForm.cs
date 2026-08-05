@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -9,13 +10,30 @@ using Markdig;
 
 namespace ClipboardQueue;
 
+internal sealed class ClipItem
+{
+    public ClipItem(string text, string? html)
+    {
+        Text = text;
+        Html = html;
+    }
+
+    public string Text { get; }
+
+    /// <summary>
+    /// The rich HTML that the source application (e.g. a browser)
+    /// put on the clipboard, if any.
+    /// </summary>
+    public string? Html { get; }
+}
+
 public sealed class MainForm : Form
 {
     private const int MaxItems = 500;
     private const int MaxItemLength = 50_000;
     private const int PreviewLength = 300;
 
-    private readonly Queue<string> _items = new();
+    private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
 
     private readonly AppSettings _settings;
@@ -53,7 +71,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue";
+        Text = "Clipboard Queue 1.3";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -97,7 +115,7 @@ public sealed class MainForm : Form
 
         var pasteAllButton = new Button
         {
-            Text = "Paste all (Ctrl+Alt+V or Ctrl+V + right mouse)",
+            Text = "Paste all (Ctrl+Alt+V or Ctrl+V + left mouse)",
             AutoSize = true
         };
         pasteAllButton.Click += (_, _) => PasteAll();
@@ -380,9 +398,26 @@ public sealed class MainForm : Form
 
             string text = Clipboard.GetText();
 
+            // Also capture the rich HTML that the source app (e.g. browser)
+            // placed on the clipboard, so we can paste it back exactly.
+            string? html = null;
+
+            try
+            {
+                if (Clipboard.ContainsText(TextDataFormat.Html))
+                {
+                    string rawHtml = Clipboard.GetText(TextDataFormat.Html);
+                    html = HtmlClipboardHelper.ExtractFragment(rawHtml);
+                }
+            }
+            catch
+            {
+                html = null;
+            }
+
             _lastClipboardSequence = current;
 
-            AddClipboardText(text);
+            AddClipboardItem(text, html);
         }
         catch
         {
@@ -391,7 +426,7 @@ public sealed class MainForm : Form
         }
     }
 
-    private void AddClipboardText(string text)
+    private void AddClipboardItem(string text, string? html)
     {
         if (_pauseMonitoring)
             return;
@@ -411,7 +446,7 @@ public sealed class MainForm : Form
 
         lock (_sync)
         {
-            _items.Enqueue(text);
+            _items.Enqueue(new ClipItem(text, html));
 
             while (_items.Count > MaxItems)
             {
@@ -424,7 +459,7 @@ public sealed class MainForm : Form
 
     private void RefreshUi()
     {
-        string[] items;
+        ClipItem[] items;
 
         lock (_sync)
         {
@@ -434,9 +469,9 @@ public sealed class MainForm : Form
         _listView.BeginUpdate();
         _listView.Items.Clear();
 
-        foreach (string item in items)
+        foreach (ClipItem item in items)
         {
-            _listView.Items.Add(new ListViewItem(MakePreview(item)));
+            _listView.Items.Add(new ListViewItem(MakePreview(item.Text)));
         }
 
         _listView.EndUpdate();
@@ -472,7 +507,7 @@ public sealed class MainForm : Form
 
         lock (_sync)
         {
-            string[] current = _items.ToArray();
+            ClipItem[] current = _items.ToArray();
             _items.Clear();
 
             for (int i = 0; i < current.Length; i++)
@@ -499,26 +534,26 @@ public sealed class MainForm : Form
 
     private async void PasteNext()
     {
-        string? text = null;
+        ClipItem? item = null;
 
         lock (_sync)
         {
             if (_items.Count > 0)
             {
-                text = _items.Dequeue();
+                item = _items.Dequeue();
             }
         }
 
-        if (text == null)
+        if (item == null)
             return;
 
         RefreshUi();
-        await PasteRenderedMarkdownAsync(text);
+        await PasteRichAsync(item.Text, item.Html);
     }
 
     private async void PasteAll()
     {
-        string[] items;
+        ClipItem[] items;
 
         lock (_sync)
         {
@@ -535,28 +570,60 @@ public sealed class MainForm : Form
             ? Environment.NewLine + Environment.NewLine
             : _settings.PasteAllSeparator;
 
-        string combined = string.Join(separator, items);
+        // Build combined text + combined HTML in the background.
+        var combined = await Task.Run(() =>
+        {
+            var textBuilder = new StringBuilder();
+            var htmlBuilder = new StringBuilder();
 
-        await PasteRenderedMarkdownAsync(combined);
+            for (int i = 0; i < items.Length; i++)
+            {
+                ClipItem item = items[i];
+
+                textBuilder.Append(item.Text);
+
+                htmlBuilder.Append(
+                    string.IsNullOrWhiteSpace(item.Html)
+                        ? Markdown.ToHtml(item.Text, MarkdownPipeline)
+                        : item.Html);
+
+                if (i < items.Length - 1)
+                {
+                    textBuilder.Append(separator);
+
+                    // A blank line between items in the rich version.
+                    htmlBuilder.Append("<p><br></p>");
+                }
+            }
+
+            return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
+        });
+
+        await PasteRichAsync(combined.Text, combined.Html);
     }
 
-    private async Task PasteRenderedMarkdownAsync(string markdown)
+    private async Task PasteRichAsync(string text, string? html)
     {
         try
         {
-            // Render Markdown to HTML for rich-text targets.
-            string html = await Task.Run(() => Markdown.ToHtml(markdown, MarkdownPipeline));
+            string htmlToUse = html;
 
-            string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(html);
+            // No stored HTML (e.g. copied from Notepad): render Markdown.
+            if (string.IsNullOrWhiteSpace(htmlToUse))
+            {
+                htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
+            }
+
+            string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
 
             // Preferred: native clipboard write with guaranteed UTF-8 CF_HTML.
-            bool clipboardSet = NativeClipboard.TrySetHtmlAndText(markdown, htmlClipboardData);
+            bool clipboardSet = NativeClipboard.TrySetHtmlAndText(text, htmlClipboardData);
 
             if (!clipboardSet)
             {
                 // Fallback: managed WinForms clipboard.
                 var data = new DataObject();
-                data.SetData(DataFormats.UnicodeText, markdown);
+                data.SetData(DataFormats.UnicodeText, text);
                 data.SetData(DataFormats.Html, htmlClipboardData);
                 clipboardSet = await TrySetClipboardAsync(data);
             }
@@ -564,7 +631,7 @@ public sealed class MainForm : Form
             if (!clipboardSet)
                 return;
 
-            _lastProgrammaticClipboardText = markdown;
+            _lastProgrammaticClipboardText = text;
             _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
