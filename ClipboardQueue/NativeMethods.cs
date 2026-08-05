@@ -119,11 +119,12 @@ internal static class NativeMethods
     }
 
     /// <summary>
-    /// Waits until Ctrl / Alt / Shift / Win are physically released.
-    /// This prevents the simulated Ctrl+V from becoming e.g. Ctrl+Alt+V
-    /// because the user is still holding a modifier key.
+    /// Waits until Ctrl / Alt / Shift / Win AND both mouse buttons are
+    /// physically released, then waits a short moment for things like
+    /// context menus / selection changes to settle.
+    /// This prevents the simulated Ctrl+V from being swallowed.
     /// </summary>
-    public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 1000)
+    public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 1500)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -134,13 +135,19 @@ internal static class NativeMethods
                 (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
                 (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
                 (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
-                (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+                (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
 
             if (!anyPressed)
-                return;
+                break;
 
             Thread.Sleep(20);
         }
+
+        // Let the target app finish processing the key/mouse releases
+        // (selection changes, closing menus, etc.) before we paste.
+        Thread.Sleep(80);
     }
 
     public static void SendCtrlV()
