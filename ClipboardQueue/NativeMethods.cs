@@ -1,5 +1,7 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace ClipboardQueue;
 
@@ -23,9 +25,13 @@ internal static class NativeMethods
     public const int WM_SYSKEYDOWN = 0x0104;
     public const int WM_SYSKEYUP = 0x0105;
 
+    public const int VK_SHIFT = 0x10;
     public const int VK_CONTROL = 0x11;
     public const int VK_MENU = 0x12;
+    public const int VK_LWIN = 0x5B;
+    public const int VK_RWIN = 0x5C;
     public const int VK_V = 0x56;
+    public const int VK_RBUTTON = 0x02;
 
     public const int LLKHF_INJECTED = 0x10;
     public const int LLKHF_UP = 0x80;
@@ -109,6 +115,31 @@ internal static class NativeMethods
         public uint uMsg;
         public ushort wParamL;
         public ushort wParamH;
+    }
+
+    /// <summary>
+    /// Waits until Ctrl / Alt / Shift / Win are physically released.
+    /// This prevents the simulated Ctrl+V from becoming e.g. Ctrl+Alt+V
+    /// because the user is still holding a modifier key.
+    /// </summary>
+    public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 1000)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+        {
+            bool anyPressed =
+                (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+            if (!anyPressed)
+                return;
+
+            Thread.Sleep(20);
+        }
     }
 
     public static void SendCtrlV()
