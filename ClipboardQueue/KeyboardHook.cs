@@ -53,13 +53,17 @@ internal sealed class KeyboardHook : IDisposable
                     {
                         bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
                         bool altDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
+                        bool rightMouseDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_RBUTTON) & 0x8000) != 0;
 
                         if (ctrlDown)
                         {
                             if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                                 wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
                             {
-                                if (altDown)
+                                // Ctrl+Alt+V  -> paste all
+                                // Ctrl+V while holding right mouse button -> paste all
+                                // Ctrl+V -> paste next
+                                if (altDown || rightMouseDown)
                                 {
                                     if (ShouldHandleCtrlAltV?.Invoke() == true)
                                     {
