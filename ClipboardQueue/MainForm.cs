@@ -75,7 +75,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.7";
+        Text = "Clipboard Queue 1.8";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -402,6 +402,9 @@ public sealed class MainForm : Form
 
             bool userInitiated = InputActivity.Count > _inputCountAtArm;
 
+            // Diagnostic: log who reads the clipboard and when.
+            ReadLogger.Log(userInitiated ? "PASTE (user)" : "BACKGROUND READ");
+
             if (userInitiated)
             {
                 _renderConsumeTimer?.Stop();
@@ -429,10 +432,9 @@ public sealed class MainForm : Form
         _notifyIcon.ShowBalloonTip(
             10000,
             "Clipboard Queue",
-            "Another app is reading the clipboard (for example Windows Clipboard History). " +
-            "'Intercept all pastes' has been disabled for this session so your items stay safe. " +
-            "Keyboard shortcuts still work. To get full mode back: " +
-            "Settings - System - Clipboard - turn OFF Clipboard history, then restart Clipboard Queue.",
+            "Another app is reading the clipboard. Your items stay safe; " +
+            "full 'intercept all pastes' mode is disabled for this session. " +
+            "See clipboard_reads.log in %APPDATA%\\ClipboardQueue to identify the app.",
             ToolTipIcon.Warning);
     }
 
