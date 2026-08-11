@@ -56,6 +56,7 @@ public sealed class MainForm : Form
     private uint _lastClipboardSequence;
 
     private bool _armed;
+    private bool _readerDetected;
     private ClipItem? _renderedItem;
     private long _inputCountAtArm;
 
@@ -78,7 +79,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.6";
+        Text = "Clipboard Queue 1.7";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -423,15 +424,40 @@ public sealed class MainForm : Form
             }
             else
             {
-                // A background app (clipboard history, translator, etc.) read
-                // the clipboard. Keep the item, and re-arm so that a later real
-                // paste still triggers a render + consumption.
-                PostToUi(SyncClipboardOwnership);
+                // A background app (Windows Clipboard History, translator, etc.)
+                // read the clipboard WITHOUT any new user input.
+                //
+                // Do NOT re-arm here: re-arming would cause the reader to read
+                // again, and the next read (after your next click) would look
+                // like a real paste and eat the item.
+                //
+                // Instead: give the reader the data, keep the item, and fall
+                // back to keyboard-only interception for this session.
+                if (!_readerDetected)
+                {
+                    _readerDetected = true;
+                    PostToUi(OnBackgroundReaderDetected);
+                }
             }
         }
         catch
         {
         }
+    }
+
+    private void OnBackgroundReaderDetected()
+    {
+        _armed = false;
+        _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+
+        _notifyIcon.ShowBalloonTip(
+            10000,
+            "Clipboard Queue",
+            "Another app is reading the clipboard (for example Windows Clipboard History). " +
+            "'Intercept all pastes' has been disabled for this session so your items stay safe. " +
+            "Keyboard shortcuts still work. To get full mode back: " +
+            "Settings → System → Clipboard → turn OFF Clipboard history, then restart Clipboard Queue.",
+            ToolTipIcon.Warning);
     }
 
     private void ConsumeRenderedItem()
@@ -459,7 +485,9 @@ public sealed class MainForm : Form
 
     private void SyncClipboardOwnership()
     {
-        if (!_settings.InterceptAllPastes || GetCount() == 0)
+        if (_readerDetected ||
+            !_settings.InterceptAllPastes ||
+            GetCount() == 0)
         {
             _armed = false;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
@@ -667,262 +695,4 @@ public sealed class MainForm : Form
         }
 
         _listView.BeginUpdate();
-        _listView.Items.Clear();
-
-        foreach (ClipItem item in items)
-        {
-            _listView.Items.Add(new ListViewItem(MakePreview(item.Text)));
-        }
-
-        _listView.EndUpdate();
-
-        _countLabel.Text = $"{items.Length} item(s)";
-
-        string tooltip = $"Clipboard Queue: {items.Length} item(s)";
-
-        if (tooltip.Length > 127)
-            tooltip = tooltip[..127];
-
-        _notifyIcon.Text = tooltip;
-    }
-
-    private static string MakePreview(string text)
-    {
-        string oneLine = text
-            .Replace("\r", string.Empty)
-            .Replace("\n", " ⏎ ");
-
-        if (oneLine.Length <= PreviewLength)
-            return oneLine;
-
-        return oneLine[..PreviewLength] + "…";
-    }
-
-    private void DeleteSelected()
-    {
-        if (_listView.SelectedIndices.Count == 0)
-            return;
-
-        HashSet<int> selected = _listView.SelectedIndices.Cast<int>().ToHashSet();
-
-        lock (_sync)
-        {
-            ClipItem[] current = _items.ToArray();
-            _items.Clear();
-
-            for (int i = 0; i < current.Length; i++)
-            {
-                if (!selected.Contains(i))
-                {
-                    _items.Enqueue(current[i]);
-                }
-            }
-        }
-
-        RefreshUi();
-        SyncClipboardOwnership();
-    }
-
-    private void ClearAll()
-    {
-        lock (_sync)
-        {
-            _items.Clear();
-        }
-
-        RefreshUi();
-        SyncClipboardOwnership();
-    }
-
-    // ------------------------------------------------------------------
-    // Pasting
-    // ------------------------------------------------------------------
-
-    private async void PasteNext()
-    {
-        ClipItem? item = null;
-
-        lock (_sync)
-        {
-            if (_items.Count > 0)
-            {
-                item = _items.Dequeue();
-            }
-        }
-
-        if (item == null)
-            return;
-
-        RefreshUi();
-        await PasteRichAsync(item.Text, item.Html);
-    }
-
-    private async void PasteAll()
-    {
-        ClipItem[] items;
-
-        lock (_sync)
-        {
-            if (_items.Count == 0)
-                return;
-
-            items = _items.ToArray();
-            _items.Clear();
-        }
-
-        RefreshUi();
-
-        string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
-            ? Environment.NewLine + Environment.NewLine
-            : _settings.PasteAllSeparator;
-
-        bool renderMarkdown = _settings.RenderMarkdownForPlainText;
-
-        var combined = await Task.Run(() =>
-        {
-            var textBuilder = new StringBuilder();
-            var htmlBuilder = new StringBuilder();
-
-            for (int i = 0; i < items.Length; i++)
-            {
-                ClipItem item = items[i];
-
-                textBuilder.Append(item.Text);
-
-                htmlBuilder.Append(
-                    string.IsNullOrWhiteSpace(item.Html)
-                        ? (renderMarkdown
-                            ? Markdown.ToHtml(item.Text, MarkdownPipeline)
-                            : HtmlClipboardHelper.PlainTextToHtml(item.Text))
-                        : item.Html);
-
-                if (i < items.Length - 1)
-                {
-                    textBuilder.Append(separator);
-                    htmlBuilder.Append("<p><br></p>");
-                }
-            }
-
-            return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
-        });
-
-        await PasteRichAsync(combined.Text, combined.Html);
-    }
-
-    private async Task PasteRichAsync(string text, string? html)
-    {
-        try
-        {
-            string htmlToUse = html ?? string.Empty;
-
-            if (string.IsNullOrWhiteSpace(htmlToUse))
-            {
-                bool renderMarkdown = _settings.RenderMarkdownForPlainText;
-                string textCopy = text;
-
-                htmlToUse = await Task.Run(() =>
-                    renderMarkdown
-                        ? Markdown.ToHtml(textCopy, MarkdownPipeline)
-                        : HtmlClipboardHelper.PlainTextToHtml(textCopy));
-            }
-
-            string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
-
-            bool clipboardSet = NativeClipboard.TrySetHtmlAndText(text, htmlClipboardData);
-
-            if (!clipboardSet)
-            {
-                var data = new DataObject();
-                data.SetData(DataFormats.UnicodeText, text);
-                data.SetData(DataFormats.Html, htmlClipboardData);
-                clipboardSet = await TrySetClipboardAsync(data);
-            }
-
-            if (!clipboardSet)
-                return;
-
-            _lastProgrammaticClipboardText = text;
-            _lastProgrammaticClipboardTime = DateTime.UtcNow;
-            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-
-            await Task.Delay(100);
-
-            NativeMethods.WaitForModifierKeysRelease();
-
-            NativeMethods.SendCtrlV();
-
-            _renderedItem = null;
-            SyncClipboardOwnership();
-        }
-        catch
-        {
-            // Ignore paste errors.
-        }
-    }
-
-    private static async Task<bool> TrySetClipboardAsync(IDataObject data, int retries = 10)
-    {
-        for (int i = 0; i < retries; i++)
-        {
-            try
-            {
-                Clipboard.SetDataObject(data, true);
-                return true;
-            }
-            catch
-            {
-                await Task.Delay(100);
-            }
-        }
-
-        return false;
-    }
-
-    private void ExitApplication()
-    {
-        _exitRequested = true;
-        Cleanup();
-        Application.Exit();
-    }
-
-    private void Cleanup()
-    {
-        if (_cleanedUp)
-            return;
-
-        _cleanedUp = true;
-
-        try
-        {
-            if (IsHandleCreated)
-                NativeMethods.RemoveClipboardFormatListener(Handle);
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            _clipboardTimer?.Stop();
-            _clipboardTimer?.Dispose();
-
-            _renderConsumeTimer?.Stop();
-            _renderConsumeTimer?.Dispose();
-        }
-        catch
-        {
-        }
-
-        _keyboardHook?.Dispose();
-        _mouseHook?.Dispose();
-
-        try
-        {
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
-        }
-        catch
-        {
-        }
-    }
-}
+        _list
