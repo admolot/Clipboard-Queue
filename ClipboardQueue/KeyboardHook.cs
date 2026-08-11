@@ -41,6 +41,14 @@ internal sealed class KeyboardHook : IDisposable
         {
             if (nCode >= 0)
             {
+                // Count every key press so we can distinguish real user pastes
+                // from background clipboard readers.
+                if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
+                    wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
+                {
+                    InputActivity.Note();
+                }
+
                 int vkCode = Marshal.ReadInt32(lParam);
                 int flags = Marshal.ReadInt32(lParam, 8);
 
