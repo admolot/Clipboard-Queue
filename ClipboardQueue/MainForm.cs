@@ -20,10 +20,6 @@ internal sealed class ClipItem
 
     public string Text { get; }
 
-    /// <summary>
-    /// The rich HTML that the source application (e.g. a browser)
-    /// put on the clipboard, if any.
-    /// </summary>
     public string? Html { get; }
 }
 
@@ -288,9 +284,6 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                // While we own the clipboard ("armed"), a normal Ctrl+V already
-                // pastes the oldest item via delayed rendering, so the hook must
-                // NOT intercept it in that case.
                 ShouldHandleCtrlV = () => !_armed && _settings.OverrideCtrlV && GetCount() > 0,
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
@@ -312,7 +305,6 @@ public sealed class MainForm : Form
         }
         catch
         {
-            // Not fatal: background-reader detection just becomes less precise.
         }
 
         if (_startHidden)
@@ -334,7 +326,6 @@ public sealed class MainForm : Form
 
         if (m.Msg == NativeClipboard.WM_DESTROYCLIPBOARD)
         {
-            // Somebody else put new data on the clipboard.
             _armed = false;
             base.WndProc(ref m);
             return;
@@ -380,10 +371,6 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    // ------------------------------------------------------------------
-    // Delayed-rendering clipboard ownership ("intercept all paste methods")
-    // ------------------------------------------------------------------
-
     private void HandleRenderFormat(uint format)
     {
         try
@@ -417,282 +404,5 @@ public sealed class MainForm : Form
 
             if (userInitiated)
             {
-                // A real paste (keyboard or mouse menu click) happened:
-                // consume the item after a short debounce.
                 _renderConsumeTimer?.Stop();
-                _renderConsumeTimer?.Start();
-            }
-            else
-            {
-                // A background app (Windows Clipboard History, translator, etc.)
-                // read the clipboard WITHOUT any new user input.
-                //
-                // Do NOT re-arm here: re-arming would cause the reader to read
-                // again, and the next read (after your next click) would look
-                // like a real paste and eat the item.
-                //
-                // Instead: give the reader the data, keep the item, and fall
-                // back to keyboard-only interception for this session.
-                if (!_readerDetected)
-                {
-                    _readerDetected = true;
-                    PostToUi(OnBackgroundReaderDetected);
-                }
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private void OnBackgroundReaderDetected()
-    {
-        _armed = false;
-        _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-
-        _notifyIcon.ShowBalloonTip(
-            10000,
-            "Clipboard Queue",
-            "Another app is reading the clipboard (for example Windows Clipboard History). " +
-            "'Intercept all pastes' has been disabled for this session so your items stay safe. " +
-            "Keyboard shortcuts still work. To get full mode back: " +
-            "Settings → System → Clipboard → turn OFF Clipboard history, then restart Clipboard Queue.",
-            ToolTipIcon.Warning);
-    }
-
-    private void ConsumeRenderedItem()
-    {
-        _renderConsumeTimer?.Stop();
-
-        ClipItem? rendered = _renderedItem;
-
-        if (rendered == null)
-            return;
-
-        _renderedItem = null;
-
-        lock (_sync)
-        {
-            if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
-            {
-                _items.Dequeue();
-            }
-        }
-
-        RefreshUi();
-        SyncClipboardOwnership();
-    }
-
-    private void SyncClipboardOwnership()
-    {
-        if (_readerDetected ||
-            !_settings.InterceptAllPastes ||
-            GetCount() == 0)
-        {
-            _armed = false;
-            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-            return;
-        }
-
-        if (NativeClipboard.ArmDelayed(Handle))
-        {
-            _armed = true;
-            _renderedItem = null;
-            _inputCountAtArm = InputActivity.Count;
-            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-        }
-    }
-
-    private string BuildHtmlData(ClipItem item)
-    {
-        string html;
-
-        if (!string.IsNullOrWhiteSpace(item.Html))
-        {
-            html = item.Html;
-        }
-        else if (_settings.RenderMarkdownForPlainText)
-        {
-            html = Markdown.ToHtml(item.Text, MarkdownPipeline);
-        }
-        else
-        {
-            html = HtmlClipboardHelper.PlainTextToHtml(item.Text);
-        }
-
-        return HtmlClipboardHelper.CreateHtmlClipboardData(html);
-    }
-
-    // ------------------------------------------------------------------
-    // Clipboard monitoring
-    // ------------------------------------------------------------------
-
-    private void OnClipboardUpdate()
-    {
-        try
-        {
-            uint current = NativeMethods.GetClipboardSequenceNumber();
-
-            if (_pauseMonitoring)
-            {
-                _lastClipboardSequence = current;
-                return;
-            }
-
-            if (current == _lastClipboardSequence)
-                return;
-
-            if (!Clipboard.ContainsText())
-                return;
-
-            // If the clipboard also contains an image or files (e.g. a copied
-            // picture), do NOT store the text/path and do NOT own the clipboard,
-            // so the user can paste the real image/file with a normal Ctrl+V.
-            if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList())
-            {
-                _armed = false;
-                _lastClipboardSequence = current;
-                return;
-            }
-
-            string text = Clipboard.GetText();
-
-            // Also capture the rich HTML that the source app (e.g. browser)
-            // placed on the clipboard, so we can paste it back exactly.
-            string? html = null;
-
-            try
-            {
-                if (Clipboard.ContainsText(TextDataFormat.Html))
-                {
-                    string rawHtml = Clipboard.GetText(TextDataFormat.Html);
-                    html = HtmlClipboardHelper.ExtractFragment(rawHtml);
-                }
-            }
-            catch
-            {
-                html = null;
-            }
-
-            _lastClipboardSequence = current;
-
-            AddClipboardItem(text, html);
-        }
-        catch
-        {
-            // Clipboard may be locked by another application.
-            // The timer will try again shortly.
-        }
-    }
-
-    private void AddClipboardItem(string text, string? html)
-    {
-        if (_pauseMonitoring)
-            return;
-
-        if (string.IsNullOrWhiteSpace(text))
-            return;
-
-        if (text.Length > MaxItemLength)
-            return;
-
-        // Avoid immediately re-adding content that this app just placed on the clipboard.
-        if (DateTime.UtcNow - _lastProgrammaticClipboardTime < TimeSpan.FromSeconds(2) &&
-            text == _lastProgrammaticClipboardText)
-        {
-            return;
-        }
-
-        lock (_sync)
-        {
-            _items.Enqueue(new ClipItem(text, html));
-
-            while (_items.Count > MaxItems)
-            {
-                _items.Dequeue();
-            }
-        }
-
-        RefreshUi();
-        SyncClipboardOwnership();
-    }
-
-    // ------------------------------------------------------------------
-    // UI
-    // ------------------------------------------------------------------
-
-    private void PostToUi(Action action)
-    {
-        try
-        {
-            _uiContext?.Post(_ => action(), null);
-        }
-        catch
-        {
-        }
-    }
-
-    private int GetCount()
-    {
-        lock (_sync)
-        {
-            return _items.Count;
-        }
-    }
-
-    private void SetPauseMonitoring(bool value)
-    {
-        if (_updatingPause)
-            return;
-
-        _updatingPause = true;
-
-        _pauseMonitoring = value;
-        _pauseCheckBox.Checked = value;
-        _pauseMenuItem.Checked = value;
-
-        _updatingPause = false;
-    }
-
-    private void SetStartWithWindows(bool value)
-    {
-        if (_updatingStartup)
-            return;
-
-        _updatingStartup = true;
-
-        StartupManager.SetEnabled(value);
-
-        bool enabled = StartupManager.IsEnabled();
-
-        _startupCheckBox.Checked = enabled;
-        _startupMenuItem.Checked = enabled;
-
-        _updatingStartup = false;
-    }
-
-    private void ShowQueueWindow()
-    {
-        Show();
-        ShowInTaskbar = true;
-        WindowState = FormWindowState.Normal;
-        Activate();
-    }
-
-    private void HideQueueWindow()
-    {
-        Hide();
-        ShowInTaskbar = false;
-    }
-
-    private void RefreshUi()
-    {
-        ClipItem[] items;
-
-        lock (_sync)
-        {
-            items = _items.ToArray();
-        }
-
-        _listView.BeginUpdate();
-        _list
+                _renderConsumeTimer?.
