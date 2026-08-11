@@ -405,4 +405,507 @@ public sealed class MainForm : Form
             if (userInitiated)
             {
                 _renderConsumeTimer?.Stop();
-                _renderConsumeTimer?.
+                _renderConsumeTimer?.Start();
+            }
+            else
+            {
+                if (!_readerDetected)
+                {
+                    _readerDetected = true;
+                    PostToUi(OnBackgroundReaderDetected);
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnBackgroundReaderDetected()
+    {
+        _armed = false;
+        _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+
+        _notifyIcon.ShowBalloonTip(
+            10000,
+            "Clipboard Queue",
+            "Another app is reading the clipboard (for example Windows Clipboard History). " +
+            "'Intercept all pastes' has been disabled for this session so your items stay safe. " +
+            "Keyboard shortcuts still work. To get full mode back: " +
+            "Settings - System - Clipboard - turn OFF Clipboard history, then restart Clipboard Queue.",
+            ToolTipIcon.Warning);
+    }
+
+    private void ConsumeRenderedItem()
+    {
+        _renderConsumeTimer?.Stop();
+
+        ClipItem? rendered = _renderedItem;
+
+        if (rendered == null)
+            return;
+
+        _renderedItem = null;
+
+        lock (_sync)
+        {
+            if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
+            {
+                _items.Dequeue();
+            }
+        }
+
+        RefreshUi();
+        SyncClipboardOwnership();
+    }
+
+    private void SyncClipboardOwnership()
+    {
+        if (_readerDetected ||
+            !_settings.InterceptAllPastes ||
+            GetCount() == 0)
+        {
+            _armed = false;
+            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+            return;
+        }
+
+        if (NativeClipboard.ArmDelayed(Handle))
+        {
+            _armed = true;
+            _renderedItem = null;
+            _inputCountAtArm = InputActivity.Count;
+            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+        }
+    }
+
+    private string BuildHtmlData(ClipItem item)
+    {
+        string html;
+
+        if (!string.IsNullOrWhiteSpace(item.Html))
+        {
+            html = item.Html;
+        }
+        else if (_settings.RenderMarkdownForPlainText)
+        {
+            html = Markdown.ToHtml(item.Text, MarkdownPipeline);
+        }
+        else
+        {
+            html = HtmlClipboardHelper.PlainTextToHtml(item.Text);
+        }
+
+        return HtmlClipboardHelper.CreateHtmlClipboardData(html);
+    }
+
+    private void OnClipboardUpdate()
+    {
+        try
+        {
+            uint current = NativeMethods.GetClipboardSequenceNumber();
+
+            if (_pauseMonitoring)
+            {
+                _lastClipboardSequence = current;
+                return;
+            }
+
+            if (current == _lastClipboardSequence)
+                return;
+
+            if (!Clipboard.ContainsText())
+                return;
+
+            if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList())
+            {
+                _armed = false;
+                _lastClipboardSequence = current;
+                return;
+            }
+
+            string text = Clipboard.GetText();
+
+            string? html = null;
+
+            try
+            {
+                if (Clipboard.ContainsText(TextDataFormat.Html))
+                {
+                    string rawHtml = Clipboard.GetText(TextDataFormat.Html);
+                    html = HtmlClipboardHelper.ExtractFragment(rawHtml);
+                }
+            }
+            catch
+            {
+                html = null;
+            }
+
+            _lastClipboardSequence = current;
+
+            AddClipboardItem(text, html);
+        }
+        catch
+        {
+        }
+    }
+
+    private void AddClipboardItem(string text, string? html)
+    {
+        if (_pauseMonitoring)
+            return;
+
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        if (text.Length > MaxItemLength)
+            return;
+
+        if (DateTime.UtcNow - _lastProgrammaticClipboardTime < TimeSpan.FromSeconds(2) &&
+            text == _lastProgrammaticClipboardText)
+        {
+            return;
+        }
+
+        lock (_sync)
+        {
+            _items.Enqueue(new ClipItem(text, html));
+
+            while (_items.Count > MaxItems)
+            {
+                _items.Dequeue();
+            }
+        }
+
+        RefreshUi();
+        SyncClipboardOwnership();
+    }
+
+    private void PostToUi(Action action)
+    {
+        try
+        {
+            _uiContext?.Post(_ => action(), null);
+        }
+        catch
+        {
+        }
+    }
+
+    private int GetCount()
+    {
+        lock (_sync)
+        {
+            return _items.Count;
+        }
+    }
+
+    private void SetPauseMonitoring(bool value)
+    {
+        if (_updatingPause)
+            return;
+
+        _updatingPause = true;
+
+        _pauseMonitoring = value;
+        _pauseCheckBox.Checked = value;
+        _pauseMenuItem.Checked = value;
+
+        _updatingPause = false;
+    }
+
+    private void SetStartWithWindows(bool value)
+    {
+        if (_updatingStartup)
+            return;
+
+        _updatingStartup = true;
+
+        StartupManager.SetEnabled(value);
+
+        bool enabled = StartupManager.IsEnabled();
+
+        _startupCheckBox.Checked = enabled;
+        _startupMenuItem.Checked = enabled;
+
+        _updatingStartup = false;
+    }
+
+    private void ShowQueueWindow()
+    {
+        Show();
+        ShowInTaskbar = true;
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    private void HideQueueWindow()
+    {
+        Hide();
+        ShowInTaskbar = false;
+    }
+
+    private void RefreshUi()
+    {
+        ClipItem[] items;
+
+        lock (_sync)
+        {
+            items = _items.ToArray();
+        }
+
+        _listView.BeginUpdate();
+        _listView.Items.Clear();
+
+        foreach (ClipItem item in items)
+        {
+            _listView.Items.Add(new ListViewItem(MakePreview(item.Text)));
+        }
+
+        _listView.EndUpdate();
+
+        _countLabel.Text = $"{items.Length} item(s)";
+
+        string tooltip = $"Clipboard Queue: {items.Length} item(s)";
+
+        if (tooltip.Length > 127)
+            tooltip = tooltip[..127];
+
+        _notifyIcon.Text = tooltip;
+    }
+
+    private static string MakePreview(string text)
+    {
+        string oneLine = text
+            .Replace("\r", string.Empty)
+            .Replace("\n", " ⏎ ");
+
+        if (oneLine.Length <= PreviewLength)
+            return oneLine;
+
+        return oneLine[..PreviewLength] + "…";
+    }
+
+    private void DeleteSelected()
+    {
+        if (_listView.SelectedIndices.Count == 0)
+            return;
+
+        HashSet<int> selected = _listView.SelectedIndices.Cast<int>().ToHashSet();
+
+        lock (_sync)
+        {
+            ClipItem[] current = _items.ToArray();
+            _items.Clear();
+
+            for (int i = 0; i < current.Length; i++)
+            {
+                if (!selected.Contains(i))
+                {
+                    _items.Enqueue(current[i]);
+                }
+            }
+        }
+
+        RefreshUi();
+        SyncClipboardOwnership();
+    }
+
+    private void ClearAll()
+    {
+        lock (_sync)
+        {
+            _items.Clear();
+        }
+
+        RefreshUi();
+        SyncClipboardOwnership();
+    }
+
+    private async void PasteNext()
+    {
+        ClipItem? item = null;
+
+        lock (_sync)
+        {
+            if (_items.Count > 0)
+            {
+                item = _items.Dequeue();
+            }
+        }
+
+        if (item == null)
+            return;
+
+        RefreshUi();
+        await PasteRichAsync(item.Text, item.Html);
+    }
+
+    private async void PasteAll()
+    {
+        ClipItem[] items;
+
+        lock (_sync)
+        {
+            if (_items.Count == 0)
+                return;
+
+            items = _items.ToArray();
+            _items.Clear();
+        }
+
+        RefreshUi();
+
+        string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
+            ? Environment.NewLine + Environment.NewLine
+            : _settings.PasteAllSeparator;
+
+        bool renderMarkdown = _settings.RenderMarkdownForPlainText;
+
+        var combined = await Task.Run(() =>
+        {
+            var textBuilder = new StringBuilder();
+            var htmlBuilder = new StringBuilder();
+
+            for (int i = 0; i < items.Length; i++)
+            {
+                ClipItem item = items[i];
+
+                textBuilder.Append(item.Text);
+
+                htmlBuilder.Append(
+                    string.IsNullOrWhiteSpace(item.Html)
+                        ? (renderMarkdown
+                            ? Markdown.ToHtml(item.Text, MarkdownPipeline)
+                            : HtmlClipboardHelper.PlainTextToHtml(item.Text))
+                        : item.Html);
+
+                if (i < items.Length - 1)
+                {
+                    textBuilder.Append(separator);
+                    htmlBuilder.Append("<p><br></p>");
+                }
+            }
+
+            return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
+        });
+
+        await PasteRichAsync(combined.Text, combined.Html);
+    }
+
+    private async Task PasteRichAsync(string text, string? html)
+    {
+        try
+        {
+            string htmlToUse = html ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(htmlToUse))
+            {
+                bool renderMarkdown = _settings.RenderMarkdownForPlainText;
+                string textCopy = text;
+
+                htmlToUse = await Task.Run(() =>
+                    renderMarkdown
+                        ? Markdown.ToHtml(textCopy, MarkdownPipeline)
+                        : HtmlClipboardHelper.PlainTextToHtml(textCopy));
+            }
+
+            string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
+
+            bool clipboardSet = NativeClipboard.TrySetHtmlAndText(text, htmlClipboardData);
+
+            if (!clipboardSet)
+            {
+                var data = new DataObject();
+                data.SetData(DataFormats.UnicodeText, text);
+                data.SetData(DataFormats.Html, htmlClipboardData);
+                clipboardSet = await TrySetClipboardAsync(data);
+            }
+
+            if (!clipboardSet)
+                return;
+
+            _lastProgrammaticClipboardText = text;
+            _lastProgrammaticClipboardTime = DateTime.UtcNow;
+            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+
+            await Task.Delay(100);
+
+            NativeMethods.WaitForModifierKeysRelease();
+
+            NativeMethods.SendCtrlV();
+
+            _renderedItem = null;
+            SyncClipboardOwnership();
+        }
+        catch
+        {
+        }
+    }
+
+    private static async Task<bool> TrySetClipboardAsync(IDataObject data, int retries = 10)
+    {
+        for (int i = 0; i < retries; i++)
+        {
+            try
+            {
+                Clipboard.SetDataObject(data, true);
+                return true;
+            }
+            catch
+            {
+                await Task.Delay(100);
+            }
+        }
+
+        return false;
+    }
+
+    private void ExitApplication()
+    {
+        _exitRequested = true;
+        Cleanup();
+        Application.Exit();
+    }
+
+    private void Cleanup()
+    {
+        if (_cleanedUp)
+            return;
+
+        _cleanedUp = true;
+
+        try
+        {
+            if (IsHandleCreated)
+                NativeMethods.RemoveClipboardFormatListener(Handle);
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            _clipboardTimer?.Stop();
+            _clipboardTimer?.Dispose();
+
+            _renderConsumeTimer?.Stop();
+            _renderConsumeTimer?.Dispose();
+        }
+        catch
+        {
+        }
+
+        _keyboardHook?.Dispose();
+        _mouseHook?.Dispose();
+
+        try
+        {
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
+        }
+        catch
+        {
+        }
+    }
+}
