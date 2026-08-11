@@ -48,6 +48,7 @@ public sealed class MainForm : Form
     private readonly ToolStripMenuItem _startupMenuItem;
 
     private KeyboardHook? _keyboardHook;
+    private MouseHook? _mouseHook;
     private SynchronizationContext? _uiContext;
 
     private System.Windows.Forms.Timer? _clipboardTimer;
@@ -56,6 +57,7 @@ public sealed class MainForm : Form
 
     private bool _armed;
     private ClipItem? _renderedItem;
+    private long _inputCountAtArm;
 
     private bool _exitRequested;
     private bool _cleanedUp;
@@ -76,7 +78,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.5";
+        Text = "Clipboard Queue 1.6";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -303,6 +305,15 @@ public sealed class MainForm : Form
                 ToolTipIcon.Warning);
         }
 
+        try
+        {
+            _mouseHook = new MouseHook();
+        }
+        catch
+        {
+            // Not fatal: background-reader detection just becomes less precise.
+        }
+
         if (_startHidden)
             HideQueueWindow();
         else
@@ -401,11 +412,22 @@ public sealed class MainForm : Form
                     Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             }
 
-            // Some app requested the clipboard data => a paste (or a clipboard
-            // reader) happened. Remove the item after a short debounce, so a
-            // single paste that requests several formats consumes only once.
-            _renderConsumeTimer?.Stop();
-            _renderConsumeTimer?.Start();
+            bool userInitiated = InputActivity.Count > _inputCountAtArm;
+
+            if (userInitiated)
+            {
+                // A real paste (keyboard or mouse menu click) happened:
+                // consume the item after a short debounce.
+                _renderConsumeTimer?.Stop();
+                _renderConsumeTimer?.Start();
+            }
+            else
+            {
+                // A background app (clipboard history, translator, etc.) read
+                // the clipboard. Keep the item, and re-arm so that a later real
+                // paste still triggers a render + consumption.
+                PostToUi(SyncClipboardOwnership);
+            }
         }
         catch
         {
@@ -448,6 +470,7 @@ public sealed class MainForm : Form
         {
             _armed = true;
             _renderedItem = null;
+            _inputCountAtArm = InputActivity.Count;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
         }
     }
@@ -891,6 +914,7 @@ public sealed class MainForm : Form
         }
 
         _keyboardHook?.Dispose();
+        _mouseHook?.Dispose();
 
         try
         {
