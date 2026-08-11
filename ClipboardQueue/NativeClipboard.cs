@@ -6,16 +6,24 @@ using System.Threading;
 namespace ClipboardQueue;
 
 /// <summary>
-/// Writes text + HTML to the clipboard using the native Win32 API,
-/// so the CF_HTML ("HTML Format") data is guaranteed to be UTF-8
-/// with correct byte offsets. This makes rich paste work reliably
-/// in apps like Anki, Word, browsers, etc.
+/// Native Win32 clipboard access:
+/// - writing text + UTF-8 CF_HTML with correct byte offsets,
+/// - "delayed rendering" ownership so we can detect when ANY app pastes.
 /// </summary>
 internal static class NativeClipboard
 {
-    private const uint CF_UNICODETEXT = 13;
-    private const uint GMEM_MOVEABLE = 0x0002;
-    private const uint GMEM_ZEROINIT = 0x0040;
+    public const uint CF_UNICODETEXT = 13;
+    public const uint GMEM_MOVEABLE = 0x0002;
+    public const uint GMEM_ZEROINIT = 0x0040;
+
+    public const int WM_RENDERALLFORMATS = 0x0306;
+    public const int WM_RENDERFORMAT = 0x0305;
+    public const int WM_DESTROYCLIPBOARD = 0x0301;
+
+    private static uint? _cfHtml;
+
+    public static uint CfHtml =>
+        _cfHtml ??= RegisterClipboardFormat("HTML Format");
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool OpenClipboard(IntPtr hWndNewOwner);
@@ -46,14 +54,9 @@ internal static class NativeClipboard
 
     public static bool TrySetHtmlAndText(string text, string htmlClipboardData, int retries = 10)
     {
-        uint cfHtml = RegisterClipboardFormat("HTML Format");
-
-        if (cfHtml == 0)
-            return false;
-
         for (int i = 0; i < retries; i++)
         {
-            if (TrySetOnce(text, htmlClipboardData, cfHtml))
+            if (TrySetOnce(text, htmlClipboardData))
                 return true;
 
             Thread.Sleep(80);
@@ -62,7 +65,7 @@ internal static class NativeClipboard
         return false;
     }
 
-    private static bool TrySetOnce(string text, string htmlClipboardData, uint cfHtml)
+    private static bool TrySetOnce(string text, string htmlClipboardData)
     {
         if (!OpenClipboard(IntPtr.Zero))
             return false;
@@ -72,8 +75,8 @@ internal static class NativeClipboard
             if (!EmptyClipboard())
                 return false;
 
-            bool textOk = SetUnicodeText(text);
-            bool htmlOk = SetHtml(htmlClipboardData, cfHtml);
+            bool textOk = SetBytes(CF_UNICODETEXT, Encoding.Unicode.GetBytes(text + "\0"));
+            bool htmlOk = SetBytes(CfHtml, Encoding.UTF8.GetBytes(htmlClipboardData + "\0"));
 
             return textOk && htmlOk;
         }
@@ -83,16 +86,70 @@ internal static class NativeClipboard
         }
     }
 
-    private static bool SetUnicodeText(string text)
+    /// <summary>
+    /// Takes ownership of the clipboard using delayed rendering.
+    /// The data is supplied later, when another app actually requests it
+    /// (we get WM_RENDERFORMAT then). This is how we detect "any" paste.
+    /// </summary>
+    public static bool ArmDelayed(IntPtr ownerWindow, int retries = 10)
     {
-        byte[] bytes = Encoding.Unicode.GetBytes(text + "\0");
-        return SetBytes(CF_UNICODETEXT, bytes);
+        for (int i = 0; i < retries; i++)
+        {
+            if (!OpenClipboard(ownerWindow))
+            {
+                Thread.Sleep(50);
+                continue;
+            }
+
+            try
+            {
+                if (EmptyClipboard())
+                {
+                    SetClipboardData(CF_UNICODETEXT, IntPtr.Zero);
+                    SetClipboardData(CfHtml, IntPtr.Zero);
+                    return true;
+                }
+            }
+            finally
+            {
+                CloseClipboard();
+            }
+        }
+
+        return false;
     }
 
-    private static bool SetHtml(string htmlClipboardData, uint cfHtml)
+    /// <summary>
+    /// Supplies data while handling WM_RENDERFORMAT.
+    /// Must be called WITHOUT opening the clipboard.
+    /// </summary>
+    public static bool ProvideData(uint format, byte[] bytes)
     {
-        byte[] bytes = Encoding.UTF8.GetBytes(htmlClipboardData + "\0");
-        return SetBytes(cfHtml, bytes);
+        IntPtr hMem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, (UIntPtr)bytes.Length);
+
+        if (hMem == IntPtr.Zero)
+            return false;
+
+        IntPtr locked = GlobalLock(hMem);
+
+        if (locked == IntPtr.Zero)
+        {
+            GlobalFree(hMem);
+            return false;
+        }
+
+        Marshal.Copy(bytes, 0, locked, bytes.Length);
+        GlobalUnlock(hMem);
+
+        IntPtr result = SetClipboardData(format, hMem);
+
+        if (result == IntPtr.Zero)
+        {
+            GlobalFree(hMem);
+            return false;
+        }
+
+        return true;
     }
 
     private static bool SetBytes(uint format, byte[] bytes)
@@ -121,7 +178,6 @@ internal static class NativeClipboard
             return false;
         }
 
-        // On success the system owns hMem. Do NOT free it.
         return true;
     }
 }
