@@ -17,6 +17,9 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Generate app icon (if missing)
+        run: dotnet run --project Tools/IconGen -- ClipboardQueue/app.ico
+
       - name: Publish
         run: dotnet publish ClipboardQueue/ClipboardQueue.csproj -c Release -r win-x64 --self-contained true
 
