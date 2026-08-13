@@ -10,6 +10,7 @@ internal sealed class MouseHook : IDisposable
 
     private const int WM_LBUTTONDOWN = 0x0201;
     private const int WM_RBUTTONDOWN = 0x0204;
+    private const int WM_RBUTTONUP = 0x0205;
     private const int WM_MBUTTONDOWN = 0x0207;
     private const int WM_XBUTTONDOWN = 0x020B;
 
@@ -37,6 +38,8 @@ internal sealed class MouseHook : IDisposable
     private readonly IntPtr _hookId;
     private bool _disposed;
 
+    private DateTime _lastRightButtonUp = DateTime.MinValue;
+
     public MouseHook()
     {
         _proc = HookCallback;
@@ -61,10 +64,25 @@ internal sealed class MouseHook : IDisposable
             {
                 int msg = (int)wParam;
 
-                if (msg == WM_LBUTTONDOWN ||
-                    msg == WM_RBUTTONDOWN ||
-                    msg == WM_MBUTTONDOWN ||
-                    msg == WM_XBUTTONDOWN)
+                if (msg == WM_RBUTTONUP)
+                {
+                    _lastRightButtonUp = DateTime.UtcNow;
+                    InputActivity.Note();
+                }
+                else if (msg == WM_LBUTTONDOWN)
+                {
+                    // A left click shortly after a right click almost always means
+                    // "user chose an item from a context menu" (e.g. Paste).
+                    if ((DateTime.UtcNow - _lastRightButtonUp).TotalSeconds < 10)
+                    {
+                        InputActivity.NoteGesture();
+                    }
+                    else
+                    {
+                        InputActivity.Note();
+                    }
+                }
+                else if (msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN)
                 {
                     InputActivity.Note();
                 }
