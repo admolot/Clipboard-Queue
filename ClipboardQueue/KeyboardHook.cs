@@ -41,15 +41,24 @@ internal sealed class KeyboardHook : IDisposable
         {
             if (nCode >= 0)
             {
-                // Count every key press so we can distinguish real user pastes
-                // from background clipboard readers.
                 if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                     wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
                 {
-                    InputActivity.Note();
+                    int vkCode = Marshal.ReadInt32(lParam);
+                    bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+
+                    // Ctrl+V (with or without Alt) is a paste gesture.
+                    if (ctrlDown && vkCode == NativeMethods.VK_V)
+                    {
+                        InputActivity.NoteGesture();
+                    }
+                    else
+                    {
+                        InputActivity.Note();
+                    }
                 }
 
-                int vkCode = Marshal.ReadInt32(lParam);
+                int vk = Marshal.ReadInt32(lParam);
                 int flags = Marshal.ReadInt32(lParam, 8);
 
                 bool injected = (flags & NativeMethods.LLKHF_INJECTED) != 0;
@@ -57,13 +66,13 @@ internal sealed class KeyboardHook : IDisposable
 
                 if (!injected)
                 {
-                    if (vkCode == NativeMethods.VK_V)
+                    if (vk == NativeMethods.VK_V)
                     {
-                        bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+                        bool ctrlDown2 = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
                         bool altDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
                         bool leftMouseDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
 
-                        if (ctrlDown)
+                        if (ctrlDown2)
                         {
                             if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                                 wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
@@ -102,9 +111,9 @@ internal sealed class KeyboardHook : IDisposable
                     }
 
                     if (keyUp &&
-                        (vkCode == NativeMethods.VK_V ||
-                         vkCode == NativeMethods.VK_CONTROL ||
-                         vkCode == NativeMethods.VK_MENU))
+                        (vk == NativeMethods.VK_V ||
+                         vk == NativeMethods.VK_CONTROL ||
+                         vk == NativeMethods.VK_MENU))
                     {
                         _ctrlVHandled = false;
                         _ctrlAltVHandled = false;
