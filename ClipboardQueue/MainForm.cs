@@ -52,9 +52,10 @@ public sealed class MainForm : Form
     private uint _lastClipboardSequence;
 
     private bool _armed;
-    private bool _readerDetected;
+    private bool _poisoned;
+    private DateTime _armedAt = DateTime.MinValue;
+    private DateTime _lastArmTime = DateTime.MinValue;
     private ClipItem? _renderedItem;
-    private long _inputCountAtArm;
 
     private bool _exitRequested;
     private bool _cleanedUp;
@@ -75,7 +76,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.8";
+        Text = "Clipboard Queue 1.9";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -284,7 +285,11 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                ShouldHandleCtrlV = () => !_armed && _settings.OverrideCtrlV && GetCount() > 0,
+                // While we cleanly own the clipboard, a normal Ctrl+V already
+                // pastes the oldest item via delayed rendering. If ownership is
+                // disturbed by a background reader, the hook takes over.
+                ShouldHandleCtrlV = () =>
+                    _settings.OverrideCtrlV && GetCount() > 0 && (!_armed || _poisoned),
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
                 CtrlAltVPressed = () => PostToUi(PasteAll)
@@ -400,9 +405,11 @@ public sealed class MainForm : Form
                     Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             }
 
-            bool userInitiated = InputActivity.Count > _inputCountAtArm;
+            // Only a paste-like gesture (Ctrl+V, or picking "Paste" from a
+            // context menu) counts as a real paste. Plain clicks that merely
+            // focus a window (e.g. Anki's Add window) do NOT count.
+            bool userInitiated = InputActivity.LastGesture > _armedAt;
 
-            // Diagnostic: log who reads the clipboard and when.
             ReadLogger.Log(userInitiated ? "PASTE (user)" : "BACKGROUND READ");
 
             if (userInitiated)
@@ -412,30 +419,24 @@ public sealed class MainForm : Form
             }
             else
             {
-                if (!_readerDetected)
+                // A background app read the clipboard. Keep the item.
+                // Re-arm (rate-limited) so later real pastes still work;
+                // if the reader reacts to every clipboard change, give up
+                // re-arming for this cycle and let the keyboard hook take over.
+                if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
                 {
-                    _readerDetected = true;
-                    PostToUi(OnBackgroundReaderDetected);
+                    PostToUi(SyncClipboardOwnership);
+                }
+                else
+                {
+                    _poisoned = true;
+                    _armed = false;
                 }
             }
         }
         catch
         {
         }
-    }
-
-    private void OnBackgroundReaderDetected()
-    {
-        _armed = false;
-        _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-
-        _notifyIcon.ShowBalloonTip(
-            10000,
-            "Clipboard Queue",
-            "Another app is reading the clipboard. Your items stay safe; " +
-            "full 'intercept all pastes' mode is disabled for this session. " +
-            "See clipboard_reads.log in %APPDATA%\\ClipboardQueue to identify the app.",
-            ToolTipIcon.Warning);
     }
 
     private void ConsumeRenderedItem()
@@ -463,9 +464,7 @@ public sealed class MainForm : Form
 
     private void SyncClipboardOwnership()
     {
-        if (_readerDetected ||
-            !_settings.InterceptAllPastes ||
-            GetCount() == 0)
+        if (!_settings.InterceptAllPastes || GetCount() == 0)
         {
             _armed = false;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
@@ -475,8 +474,10 @@ public sealed class MainForm : Form
         if (NativeClipboard.ArmDelayed(Handle))
         {
             _armed = true;
+            _poisoned = false;
+            _armedAt = DateTime.UtcNow;
+            _lastArmTime = DateTime.UtcNow;
             _renderedItem = null;
-            _inputCountAtArm = InputActivity.Count;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
         }
     }
