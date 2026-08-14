@@ -45,6 +45,7 @@ public sealed class MainForm : Form
 
     private KeyboardHook? _keyboardHook;
     private MouseHook? _mouseHook;
+    private CursorCounter? _cursorCounter;
     private SynchronizationContext? _uiContext;
 
     private System.Windows.Forms.Timer? _clipboardTimer;
@@ -62,6 +63,7 @@ public sealed class MainForm : Form
     private bool _pauseMonitoring;
     private bool _updatingPause;
     private bool _updatingStartup;
+    private bool _suppressCounter = true;
 
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
@@ -76,7 +78,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.9";
+        Text = "Clipboard Queue 1.10";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -262,6 +264,8 @@ public sealed class MainForm : Form
 
         _uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
 
+        _cursorCounter = new CursorCounter();
+
         NativeMethods.AddClipboardFormatListener(Handle);
 
         _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
@@ -285,9 +289,6 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                // While we cleanly own the clipboard, a normal Ctrl+V already
-                // pastes the oldest item via delayed rendering. If ownership is
-                // disturbed by a background reader, the hook takes over.
                 ShouldHandleCtrlV = () =>
                     _settings.OverrideCtrlV && GetCount() > 0 && (!_armed || _poisoned),
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
@@ -409,8 +410,6 @@ public sealed class MainForm : Form
             // context menu) counts as a real paste. Plain clicks that merely
             // focus a window (e.g. Anki's Add window) do NOT count.
             bool userInitiated = InputActivity.LastGesture > _armedAt;
-
-            ReadLogger.Log(userInitiated ? "PASTE (user)" : "BACKGROUND READ");
 
             if (userInitiated)
             {
@@ -675,6 +674,17 @@ public sealed class MainForm : Form
             tooltip = tooltip[..127];
 
         _notifyIcon.Text = tooltip;
+
+        // Show the count near the mouse pointer on every change,
+        // except the very first refresh at startup.
+        if (_suppressCounter)
+        {
+            _suppressCounter = false;
+        }
+        else
+        {
+            _cursorCounter?.ShowCount(items.Length);
+        }
     }
 
     private static string MakePreview(string text)
@@ -901,6 +911,7 @@ public sealed class MainForm : Form
 
         _keyboardHook?.Dispose();
         _mouseHook?.Dispose();
+        _cursorCounter?.Dispose();
 
         try
         {
