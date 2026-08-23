@@ -5,11 +5,6 @@ using System.Threading;
 
 namespace ClipboardQueue;
 
-/// <summary>
-/// Native Win32 clipboard access:
-/// - writing text + UTF-8 CF_HTML with correct byte offsets,
-/// - "delayed rendering" ownership so we can detect when ANY app pastes.
-/// </summary>
 internal static class NativeClipboard
 {
     public const uint CF_UNICODETEXT = 13;
@@ -52,14 +47,14 @@ internal static class NativeClipboard
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GlobalFree(IntPtr hMem);
 
-    public static bool TrySetHtmlAndText(string text, string htmlClipboardData, int retries = 10)
+    public static bool TrySetHtmlAndText(string text, string htmlClipboardData, int retries = 5)
     {
         for (int i = 0; i < retries; i++)
         {
             if (TrySetOnce(text, htmlClipboardData))
                 return true;
 
-            Thread.Sleep(80);
+            Thread.Sleep(50);
         }
 
         return false;
@@ -86,18 +81,13 @@ internal static class NativeClipboard
         }
     }
 
-    /// <summary>
-    /// Takes ownership of the clipboard using delayed rendering.
-    /// The data is supplied later, when another app actually requests it
-    /// (we get WM_RENDERFORMAT then). This is how we detect "any" paste.
-    /// </summary>
-    public static bool ArmDelayed(IntPtr ownerWindow, int retries = 10)
+    public static bool ArmDelayed(IntPtr ownerWindow, int retries = 5)
     {
         for (int i = 0; i < retries; i++)
         {
             if (!OpenClipboard(ownerWindow))
             {
-                Thread.Sleep(50);
+                Thread.Sleep(30);
                 continue;
             }
 
@@ -119,10 +109,6 @@ internal static class NativeClipboard
         return false;
     }
 
-    /// <summary>
-    /// Supplies data while handling WM_RENDERFORMAT.
-    /// Must be called WITHOUT opening the clipboard.
-    /// </summary>
     public static bool ProvideData(uint format, byte[] bytes)
     {
         IntPtr hMem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, (UIntPtr)bytes.Length);
