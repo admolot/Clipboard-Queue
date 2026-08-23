@@ -7,6 +7,7 @@ namespace ClipboardQueue;
 /// <summary>
 /// A tiny click-through overlay that briefly shows the current queue count
 /// to the right of the mouse pointer whenever the count changes.
+/// Green = count grew (copy), red = count shrank (paste/delete/clear).
 /// </summary>
 internal sealed class CursorCounter : Form
 {
@@ -26,7 +27,7 @@ internal sealed class CursorCounter : Form
         _label = new Label
         {
             Dock = DockStyle.Fill,
-            ForeColor = Color.White,
+            ForeColor = Color.LimeGreen,
             Font = new Font("Segoe UI", 14F, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleCenter,
             Text = "0"
@@ -46,7 +47,6 @@ internal sealed class CursorCounter : Form
         };
     }
 
-    // Never steal focus from the app the user is working in.
     protected override bool ShowWithoutActivation
     {
         get { return true; }
@@ -65,7 +65,7 @@ internal sealed class CursorCounter : Form
         }
     }
 
-    public void ShowCount(int count)
+    public void ShowCount(int count, bool increased)
     {
         try
         {
@@ -73,6 +73,7 @@ internal sealed class CursorCounter : Form
 
             Location = new Point(p.X + 26, p.Y - 12);
             _label.Text = count.ToString();
+            _label.ForeColor = increased ? Color.LimeGreen : Color.Tomato;
 
             _hideTimer.Stop();
             Show();
