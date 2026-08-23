@@ -27,6 +27,7 @@ public sealed class MainForm : Form
 {
     private const int MaxItems = 500;
     private const int MaxItemLength = 50_000;
+    private const int MaxHtmlLength = 20_000;
     private const int PreviewLength = 300;
 
     private readonly Queue<ClipItem> _items = new();
@@ -64,6 +65,7 @@ public sealed class MainForm : Form
     private bool _updatingPause;
     private bool _updatingStartup;
     private bool _suppressCounter = true;
+    private int _lastCount = -1;
 
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
@@ -78,7 +80,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.10";
+        Text = "Clipboard Queue 1.11";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -406,9 +408,6 @@ public sealed class MainForm : Form
                     Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             }
 
-            // Only a paste-like gesture (Ctrl+V, or picking "Paste" from a
-            // context menu) counts as a real paste. Plain clicks that merely
-            // focus a window (e.g. Anki's Add window) do NOT count.
             bool userInitiated = InputActivity.LastGesture > _armedAt;
 
             if (userInitiated)
@@ -418,10 +417,6 @@ public sealed class MainForm : Form
             }
             else
             {
-                // A background app read the clipboard. Keep the item.
-                // Re-arm (rate-limited) so later real pastes still work;
-                // if the reader reacts to every clipboard change, give up
-                // re-arming for this cycle and let the keyboard hook take over.
                 if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
                 {
                     PostToUi(SyncClipboardOwnership);
@@ -536,6 +531,11 @@ public sealed class MainForm : Form
                 {
                     string rawHtml = Clipboard.GetText(TextDataFormat.Html);
                     html = HtmlClipboardHelper.ExtractFragment(rawHtml);
+
+                    // Keep memory bounded: huge page selections are stored
+                    // as plain text only.
+                    if (html != null && html.Length > MaxHtmlLength)
+                        html = null;
                 }
             }
             catch
@@ -639,6 +639,9 @@ public sealed class MainForm : Form
         ShowInTaskbar = true;
         WindowState = FormWindowState.Normal;
         Activate();
+
+        _suppressCounter = true;
+        RefreshUi();
     }
 
     private void HideQueueWindow()
@@ -656,15 +659,9 @@ public sealed class MainForm : Form
             items = _items.ToArray();
         }
 
-        _listView.BeginUpdate();
-        _listView.Items.Clear();
-
-        foreach (ClipItem item in items)
-        {
-            _listView.Items.Add(new ListViewItem(MakePreview(item.Text)));
-        }
-
-        _listView.EndUpdate();
+        // Rebuild the visible list only when the window is actually visible.
+        if (Visible)
+            RebuildList(items);
 
         _countLabel.Text = $"{items.Length} item(s)";
 
@@ -675,16 +672,29 @@ public sealed class MainForm : Form
 
         _notifyIcon.Text = tooltip;
 
-        // Show the count near the mouse pointer on every change,
-        // except the very first refresh at startup.
         if (_suppressCounter)
         {
             _suppressCounter = false;
         }
         else
         {
-            _cursorCounter?.ShowCount(items.Length);
+            _cursorCounter?.ShowCount(items.Length, items.Length > _lastCount);
         }
+
+        _lastCount = items.Length;
+    }
+
+    private void RebuildList(ClipItem[] items)
+    {
+        _listView.BeginUpdate();
+        _listView.Items.Clear();
+
+        foreach (ClipItem item in items)
+        {
+            _listView.Items.Add(new ListViewItem(MakePreview(item.Text)));
+        }
+
+        _listView.EndUpdate();
     }
 
     private static string MakePreview(string text)
@@ -737,21 +747,27 @@ public sealed class MainForm : Form
 
     private async void PasteNext()
     {
-        ClipItem? item = null;
+        ClipItem? item;
 
         lock (_sync)
         {
-            if (_items.Count > 0)
-            {
-                item = _items.Dequeue();
-            }
+            item = _items.Count > 0 ? _items.Peek() : null;
         }
 
         if (item == null)
             return;
 
-        RefreshUi();
-        await PasteRichAsync(item.Text, item.Html);
+        // The item is removed only AFTER the clipboard write succeeded.
+        await PasteRichAsync(item.Text, item.Html, () =>
+        {
+            lock (_sync)
+            {
+                if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
+                {
+                    _items.Dequeue();
+                }
+            }
+        });
     }
 
     private async void PasteAll()
@@ -764,10 +780,7 @@ public sealed class MainForm : Form
                 return;
 
             items = _items.ToArray();
-            _items.Clear();
         }
-
-        RefreshUi();
 
         string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
             ? Environment.NewLine + Environment.NewLine
@@ -803,10 +816,27 @@ public sealed class MainForm : Form
             return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
         });
 
-        await PasteRichAsync(combined.Text, combined.Html);
+        // Items are removed only AFTER the clipboard write succeeded.
+        await PasteRichAsync(combined.Text, combined.Html, () =>
+        {
+            lock (_sync)
+            {
+                for (int i = 0; i < items.Length; i++)
+                {
+                    if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
+                    {
+                        _items.Dequeue();
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
-    private async Task PasteRichAsync(string text, string? html)
+    private async Task PasteRichAsync(string text, string? html, Action? onSuccess)
     {
         try
         {
@@ -842,6 +872,9 @@ public sealed class MainForm : Form
             _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
+            onSuccess?.Invoke();
+            RefreshUi();
+
             await Task.Delay(100);
 
             NativeMethods.WaitForModifierKeysRelease();
@@ -856,7 +889,7 @@ public sealed class MainForm : Form
         }
     }
 
-    private static async Task<bool> TrySetClipboardAsync(IDataObject data, int retries = 10)
+    private static async Task<bool> TrySetClipboardAsync(IDataObject data, int retries = 5)
     {
         for (int i = 0; i < retries; i++)
         {
@@ -867,7 +900,7 @@ public sealed class MainForm : Form
             }
             catch
             {
-                await Task.Delay(100);
+                await Task.Delay(80);
             }
         }
 
