@@ -27,7 +27,12 @@ public sealed class MainForm : Form
 {
     private const int MaxItems = 500;
     private const int MaxItemLength = 50_000;
-    private const int MaxHtmlLength = 50_000;
+    private const int MaxHtmlLength = 1_000_000;
+
+    // Total stored characters (text + html) budget. If exceeded, the oldest
+    // items are dropped. Keeps memory (and therefore the app) light.
+    private const long MaxTotalChars = 20_000_000;
+
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
 
@@ -86,7 +91,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.12";
+        Text = "Clipboard Queue 1.13";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -502,6 +507,11 @@ public sealed class MainForm : Form
         return HtmlClipboardHelper.CreateHtmlClipboardData(html);
     }
 
+    private static long SizeOf(ClipItem item)
+    {
+        return item.Text.Length + (item.Html?.Length ?? 0);
+    }
+
     private void OnClipboardUpdate()
     {
         try
@@ -587,11 +597,6 @@ public sealed class MainForm : Form
         lock (_sync)
         {
             _items.Enqueue(new ClipItem(text, html));
-
-            while (_items.Count > MaxItems)
-            {
-                _items.Dequeue();
-            }
         }
 
         _lastStoredText = text;
@@ -675,6 +680,25 @@ public sealed class MainForm : Form
 
         lock (_sync)
         {
+            // Enforce both limits: item count and total memory budget.
+            while (_items.Count > MaxItems)
+            {
+                _items.Dequeue();
+            }
+
+            long total = 0;
+
+            foreach (ClipItem it in _items)
+            {
+                total += SizeOf(it);
+            }
+
+            while (total > MaxTotalChars && _items.Count > 0)
+            {
+                ClipItem old = _items.Dequeue();
+                total -= SizeOf(old);
+            }
+
             items = _items.ToArray();
         }
 
