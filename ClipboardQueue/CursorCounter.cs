@@ -7,10 +7,14 @@ namespace ClipboardQueue;
 /// <summary>
 /// A tiny click-through overlay that briefly shows the current queue count
 /// to the right of the mouse pointer whenever the count changes.
-/// Green = count grew (copy), red = count shrank (paste/delete/clear).
+/// The BACKGROUND is green when the count grew (copy) and red when it
+/// shrank (paste/delete/clear). The digits stay white.
 /// </summary>
 internal sealed class CursorCounter : Form
 {
+    private static readonly Color IncreasedBackground = Color.FromArgb(22, 110, 45);
+    private static readonly Color DecreasedBackground = Color.FromArgb(165, 45, 45);
+
     private readonly Label _label;
     private readonly System.Windows.Forms.Timer _hideTimer;
 
@@ -21,13 +25,13 @@ internal sealed class CursorCounter : Form
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
         Size = new Size(48, 34);
-        BackColor = Color.FromArgb(30, 30, 30);
-        Opacity = 0.85;
+        BackColor = IncreasedBackground;
+        Opacity = 0.9;
 
         _label = new Label
         {
             Dock = DockStyle.Fill,
-            ForeColor = Color.LimeGreen,
+            ForeColor = Color.White,
             Font = new Font("Segoe UI", 14F, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleCenter,
             Text = "0"
@@ -73,7 +77,7 @@ internal sealed class CursorCounter : Form
 
             Location = new Point(p.X + 26, p.Y - 12);
             _label.Text = count.ToString();
-            _label.ForeColor = increased ? Color.LimeGreen : Color.Tomato;
+            BackColor = increased ? IncreasedBackground : DecreasedBackground;
 
             _hideTimer.Stop();
             Show();
