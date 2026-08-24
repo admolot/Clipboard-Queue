@@ -29,6 +29,7 @@ public sealed class MainForm : Form
     private const int MaxItemLength = 50_000;
     private const int MaxHtmlLength = 20_000;
     private const int PreviewLength = 300;
+    private const double RepeatCopyWindowSeconds = 2.0;
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
@@ -70,6 +71,11 @@ public sealed class MainForm : Form
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
 
+    // Used to collapse held-Ctrl+C auto-repeat into a single stored item.
+    private string _lastStoredText = string.Empty;
+    private string? _lastStoredHtml;
+    private DateTime _lastStoredTime = DateTime.MinValue;
+
     private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
         .UseAdvancedExtensions()
         .UseSoftlineBreakAsHardlineBreak()
@@ -80,7 +86,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.11";
+        Text = "Clipboard Queue 1.12";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -532,8 +538,6 @@ public sealed class MainForm : Form
                     string rawHtml = Clipboard.GetText(TextDataFormat.Html);
                     html = HtmlClipboardHelper.ExtractFragment(rawHtml);
 
-                    // Keep memory bounded: huge page selections are stored
-                    // as plain text only.
                     if (html != null && html.Length > MaxHtmlLength)
                         html = null;
                 }
@@ -569,6 +573,17 @@ public sealed class MainForm : Form
             return;
         }
 
+        // Held Ctrl+C produces many identical copies in a row (auto-repeat).
+        // Store only one item for them; the window slides while repeats keep
+        // arriving, so even a long hold stores a single item.
+        if (text == _lastStoredText &&
+            html == _lastStoredHtml &&
+            (DateTime.UtcNow - _lastStoredTime).TotalSeconds < RepeatCopyWindowSeconds)
+        {
+            _lastStoredTime = DateTime.UtcNow;
+            return;
+        }
+
         lock (_sync)
         {
             _items.Enqueue(new ClipItem(text, html));
@@ -578,6 +593,10 @@ public sealed class MainForm : Form
                 _items.Dequeue();
             }
         }
+
+        _lastStoredText = text;
+        _lastStoredHtml = html;
+        _lastStoredTime = DateTime.UtcNow;
 
         RefreshUi();
         SyncClipboardOwnership();
@@ -659,7 +678,6 @@ public sealed class MainForm : Form
             items = _items.ToArray();
         }
 
-        // Rebuild the visible list only when the window is actually visible.
         if (Visible)
             RebuildList(items);
 
@@ -757,7 +775,6 @@ public sealed class MainForm : Form
         if (item == null)
             return;
 
-        // The item is removed only AFTER the clipboard write succeeded.
         await PasteRichAsync(item.Text, item.Html, () =>
         {
             lock (_sync)
@@ -816,7 +833,6 @@ public sealed class MainForm : Form
             return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
         });
 
-        // Items are removed only AFTER the clipboard write succeeded.
         await PasteRichAsync(combined.Text, combined.Html, () =>
         {
             lock (_sync)
