@@ -27,7 +27,7 @@ public sealed class MainForm : Form
 {
     private const int MaxItems = 500;
     private const int MaxItemLength = 50_000;
-    private const int MaxHtmlLength = 20_000;
+    private const int MaxHtmlLength = 50_000;
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
 
