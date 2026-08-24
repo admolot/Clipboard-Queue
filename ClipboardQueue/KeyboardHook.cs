@@ -11,6 +11,7 @@ internal sealed class KeyboardHook : IDisposable
 
     private bool _ctrlVHandled;
     private bool _ctrlAltVHandled;
+    private bool _vKeyActive;
     private bool _disposed;
 
     public Func<bool>? ShouldHandleCtrlV { get; set; }
@@ -44,21 +45,16 @@ internal sealed class KeyboardHook : IDisposable
                 if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                     wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
                 {
-                    int vkCode = Marshal.ReadInt32(lParam);
-                    bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+                    int vk = Marshal.ReadInt32(lParam);
+                    bool ctrl = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
 
-                    // Ctrl+V (with or without Alt) is a paste gesture.
-                    if (ctrlDown && vkCode == NativeMethods.VK_V)
-                    {
+                    if (ctrl && vk == NativeMethods.VK_V)
                         InputActivity.NoteGesture();
-                    }
                     else
-                    {
                         InputActivity.Note();
-                    }
                 }
 
-                int vk = Marshal.ReadInt32(lParam);
+                int vkCode = Marshal.ReadInt32(lParam);
                 int flags = Marshal.ReadInt32(lParam, 8);
 
                 bool injected = (flags & NativeMethods.LLKHF_INJECTED) != 0;
@@ -66,13 +62,24 @@ internal sealed class KeyboardHook : IDisposable
 
                 if (!injected)
                 {
-                    if (vk == NativeMethods.VK_V)
+                    bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+
+                    // Holding Ctrl+V must paste only once:
+                    // swallow auto-repeated V keydowns until the key is released.
+                    if (vkCode == NativeMethods.VK_V && ctrlDown && !keyUp)
                     {
-                        bool ctrlDown2 = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
+                        if (_vKeyActive)
+                            return (IntPtr)1;
+
+                        _vKeyActive = true;
+                    }
+
+                    if (vkCode == NativeMethods.VK_V)
+                    {
                         bool altDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
                         bool leftMouseDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
 
-                        if (ctrlDown2)
+                        if (ctrlDown)
                         {
                             if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                                 wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
@@ -111,12 +118,19 @@ internal sealed class KeyboardHook : IDisposable
                     }
 
                     if (keyUp &&
-                        (vk == NativeMethods.VK_V ||
-                         vk == NativeMethods.VK_CONTROL ||
-                         vk == NativeMethods.VK_MENU))
+                        (vkCode == NativeMethods.VK_V ||
+                         vkCode == NativeMethods.VK_CONTROL ||
+                         vkCode == NativeMethods.VK_MENU))
                     {
                         _ctrlVHandled = false;
                         _ctrlAltVHandled = false;
+                    }
+
+                    if (keyUp &&
+                        (vkCode == NativeMethods.VK_V ||
+                         vkCode == NativeMethods.VK_CONTROL))
+                    {
+                        _vKeyActive = false;
                     }
                 }
             }
