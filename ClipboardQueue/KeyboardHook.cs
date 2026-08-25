@@ -64,14 +64,19 @@ internal sealed class KeyboardHook : IDisposable
                 {
                     bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
 
-                    // Holding Ctrl+V must paste only once:
-                    // swallow auto-repeated V keydowns until the key is released.
+                    // Held Ctrl+V: the FIRST press uses our queue logic below;
+                    // every auto-repeat press is passed through untouched, so
+                    // the target app repeats the current clipboard content
+                    // natively (e.g. "111111...") without draining the queue.
                     if (vkCode == NativeMethods.VK_V && ctrlDown && !keyUp)
                     {
-                        if (_vKeyActive)
-                            return (IntPtr)1;
-
+                        bool isRepeat = _vKeyActive;
                         _vKeyActive = true;
+
+                        if (isRepeat)
+                        {
+                            return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
+                        }
                     }
 
                     if (vkCode == NativeMethods.VK_V)
