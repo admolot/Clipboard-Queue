@@ -36,6 +36,11 @@ public sealed class MainForm : Form
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
 
+    // Give the target app time to finish its paste before we touch the
+    // clipboard again (re-arm). Without this delay, our OpenClipboard raced
+    // the target's OpenClipboard and the target pasted nothing.
+    private const int SyncDelayMs = 300;
+
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
 
@@ -57,6 +62,7 @@ public sealed class MainForm : Form
 
     private System.Windows.Forms.Timer? _clipboardTimer;
     private System.Windows.Forms.Timer? _renderConsumeTimer;
+    private System.Windows.Forms.Timer? _syncTimer;
     private uint _lastClipboardSequence;
 
     private bool _armed;
@@ -94,7 +100,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.15";
+        Text = "Clipboard Queue 1.16";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -301,6 +307,17 @@ public sealed class MainForm : Form
 
         _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
 
+        _syncTimer = new System.Windows.Forms.Timer
+        {
+            Interval = SyncDelayMs
+        };
+
+        _syncTimer.Tick += (_, _) =>
+        {
+            _syncTimer.Stop();
+            SyncClipboardOwnership();
+        };
+
         try
         {
             _keyboardHook = new KeyboardHook
@@ -393,6 +410,16 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
+    /// <summary>
+    /// Delays clipboard (re)ownership so target apps always finish their
+    /// paste/copy before we open the clipboard again.
+    /// </summary>
+    private void ScheduleSync()
+    {
+        _syncTimer?.Stop();
+        _syncTimer?.Start();
+    }
+
     private void HandleRenderFormat(uint format)
     {
         try
@@ -433,7 +460,7 @@ public sealed class MainForm : Form
             {
                 if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
                 {
-                    PostToUi(SyncClipboardOwnership);
+                    PostToUi(ScheduleSync);
                 }
                 else
                 {
@@ -467,7 +494,7 @@ public sealed class MainForm : Form
         }
 
         RefreshUi();
-        SyncClipboardOwnership();
+        ScheduleSync();
     }
 
     private void SyncClipboardOwnership()
@@ -612,7 +639,7 @@ public sealed class MainForm : Form
         _lastStoredTime = DateTime.UtcNow;
 
         RefreshUi();
-        SyncClipboardOwnership();
+        ScheduleSync();
     }
 
     private void PostToUi(Action action)
@@ -780,7 +807,7 @@ public sealed class MainForm : Form
         }
 
         RefreshUi();
-        SyncClipboardOwnership();
+        ScheduleSync();
     }
 
     private void ClearAll()
@@ -791,14 +818,12 @@ public sealed class MainForm : Form
         }
 
         RefreshUi();
-        SyncClipboardOwnership();
+        ScheduleSync();
     }
 
     private async void PasteNext()
     {
-        // Never allow two paste operations at once: the second one used to
-        // overwrite the clipboard before the first simulated Ctrl+V fired,
-        // which silently lost items.
+        // Never allow two paste operations at once.
         if (_pasteBusy)
             return;
 
@@ -949,9 +974,6 @@ public sealed class MainForm : Form
             onSuccess?.Invoke();
             RefreshUi();
 
-            // Single-item paste goes out immediately; only paste-all waits for
-            // modifier keys (Alt must be released, otherwise the simulated
-            // Ctrl+V would become Ctrl+Alt+V).
             await Task.Delay(50);
 
             if (waitModifiers)
@@ -959,8 +981,9 @@ public sealed class MainForm : Form
 
             NativeMethods.SendCtrlV();
 
+            // Re-arm only AFTER the target app had time to finish its paste.
             _renderedItem = null;
-            SyncClipboardOwnership();
+            ScheduleSync();
         }
         catch
         {
@@ -1015,6 +1038,9 @@ public sealed class MainForm : Form
 
             _renderConsumeTimer?.Stop();
             _renderConsumeTimer?.Dispose();
+
+            _syncTimer?.Stop();
+            _syncTimer?.Dispose();
         }
         catch
         {
