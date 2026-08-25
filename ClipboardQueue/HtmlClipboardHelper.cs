@@ -56,7 +56,7 @@ public static class HtmlClipboardHelper
 
         // Newlines that sit purely between tags are formatting whitespace
         // (e.g. "</p>\n<p>") - remove them so we don't create extra blank lines.
-        string result = Regex.Replace(html, ">\s*[\r\n]+\s*<", "><");
+        string result = Regex.Replace(html, @">\s*[\r\n]+\s*<", "><");
 
         // Remaining newlines are inside text nodes - make them explicit breaks.
         result = result
