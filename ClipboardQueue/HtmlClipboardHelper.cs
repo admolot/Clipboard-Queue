@@ -43,6 +43,24 @@ public static class HtmlClipboardHelper
     }
 
     /// <summary>
+    /// Converts plain text to HTML preserving the layout exactly:
+    /// every newline becomes a line break, blank lines stay blank lines.
+    /// </summary>
+    public static string PlainTextToHtml(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return string.Empty;
+
+        string escaped = WebUtility.HtmlEncode(text);
+
+        escaped = escaped
+            .Replace("\r\n", "\n")
+            .Replace("\r", "\n");
+
+        return escaped.Replace("\n", "<br>");
+    }
+
+    /// <summary>
     /// Some sites (e.g. Qwen chat) put raw newline characters inside text and
     /// rely on CSS "white-space: pre-wrap" to display them. That CSS does not
     /// travel with the clipboard, so target apps collapse the newlines to
