@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace ClipboardQueue;
 
@@ -42,21 +43,28 @@ public static class HtmlClipboardHelper
     }
 
     /// <summary>
-    /// Converts plain text to HTML preserving the layout exactly:
-    /// every newline becomes a line break, blank lines stay blank lines.
+    /// Some sites (e.g. Qwen chat) put raw newline characters inside text and
+    /// rely on CSS "white-space: pre-wrap" to display them. That CSS does not
+    /// travel with the clipboard, so target apps collapse the newlines to
+    /// spaces. This method converts such in-text newlines into explicit
+    /// &lt;br&gt; tags so line breaks survive pasting anywhere.
     /// </summary>
-    public static string PlainTextToHtml(string text)
+    public static string NormalizeLineBreaks(string html)
     {
-        if (string.IsNullOrEmpty(text))
-            return string.Empty;
+        if (string.IsNullOrEmpty(html))
+            return html;
 
-        string escaped = WebUtility.HtmlEncode(text);
+        // Newlines that sit purely between tags are formatting whitespace
+        // (e.g. "</p>\n<p>") - remove them so we don't create extra blank lines.
+        string result = Regex.Replace(html, ">\s*[\r\n]+\s*<", "><");
 
-        escaped = escaped
+        // Remaining newlines are inside text nodes - make them explicit breaks.
+        result = result
             .Replace("\r\n", "\n")
-            .Replace("\r", "\n");
+            .Replace("\r", "\n")
+            .Replace("\n", "<br>");
 
-        return escaped.Replace("\n", "<br>");
+        return result;
     }
 
     /// <summary>
