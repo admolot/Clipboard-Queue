@@ -119,10 +119,9 @@ internal static class NativeMethods
     }
 
     /// <summary>
-    /// Waits until Ctrl / Alt / Shift / Win AND both mouse buttons are
+    /// Waits until Ctrl / Alt / Shift / Win and both mouse buttons are
     /// physically released, then waits a short moment for things like
     /// context menus / selection changes to settle.
-    /// This prevents the simulated Ctrl+V from being swallowed.
     /// </summary>
     public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 1500)
     {
@@ -145,20 +144,32 @@ internal static class NativeMethods
             Thread.Sleep(20);
         }
 
-        // Let the target app finish processing the key/mouse releases
-        // (selection changes, closing menus, etc.) before we paste.
         Thread.Sleep(80);
     }
 
+    /// <summary>
+    /// Simulates Ctrl+V in the foreground app.
+    /// If Ctrl is physically held right now, only V is injected - injecting a
+    /// Ctrl key-up in that case would break the held-modifier state and turn
+    /// auto-repeat presses into plain "v" characters.
+    /// </summary>
     public static void SendCtrlV()
     {
-        INPUT[] inputs = new INPUT[]
-        {
-            KeyboardInput(VK_CONTROL, false),
-            KeyboardInput(VK_V, false),
-            KeyboardInput(VK_V, true),
-            KeyboardInput(VK_CONTROL, true)
-        };
+        bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+
+        INPUT[] inputs = ctrlHeld
+            ? new INPUT[]
+            {
+                KeyboardInput(VK_V, false),
+                KeyboardInput(VK_V, true)
+            }
+            : new INPUT[]
+            {
+                KeyboardInput(VK_CONTROL, false),
+                KeyboardInput(VK_V, false),
+                KeyboardInput(VK_V, true),
+                KeyboardInput(VK_CONTROL, true)
+            };
 
         SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
     }
