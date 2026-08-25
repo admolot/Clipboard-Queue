@@ -91,7 +91,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.13";
+        Text = "Clipboard Queue 1.14";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -548,8 +548,15 @@ public sealed class MainForm : Form
                     string rawHtml = Clipboard.GetText(TextDataFormat.Html);
                     html = HtmlClipboardHelper.ExtractFragment(rawHtml);
 
-                    if (html != null && html.Length > MaxHtmlLength)
-                        html = null;
+                    if (html != null)
+                    {
+                        // Repair sites (like Qwen chat) that rely on CSS
+                        // white-space instead of real line-break markup.
+                        html = HtmlClipboardHelper.NormalizeLineBreaks(html);
+
+                        if (html.Length > MaxHtmlLength)
+                            html = null;
+                    }
                 }
             }
             catch
@@ -680,7 +687,6 @@ public sealed class MainForm : Form
 
         lock (_sync)
         {
-            // Enforce both limits: item count and total memory budget.
             while (_items.Count > MaxItems)
             {
                 _items.Dequeue();
