@@ -73,6 +73,9 @@ public sealed class MainForm : Form
     private bool _suppressCounter = true;
     private int _lastCount = -1;
 
+    // Prevents overlapping paste operations (which used to lose items).
+    private bool _pasteBusy;
+
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
 
@@ -91,7 +94,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.14";
+        Text = "Clipboard Queue 1.15";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -550,8 +553,6 @@ public sealed class MainForm : Form
 
                     if (html != null)
                     {
-                        // Repair sites (like Qwen chat) that rely on CSS
-                        // white-space instead of real line-break markup.
                         html = HtmlClipboardHelper.NormalizeLineBreaks(html);
 
                         if (html.Length > MaxHtmlLength)
@@ -795,94 +796,121 @@ public sealed class MainForm : Form
 
     private async void PasteNext()
     {
-        ClipItem? item;
-
-        lock (_sync)
-        {
-            item = _items.Count > 0 ? _items.Peek() : null;
-        }
-
-        if (item == null)
+        // Never allow two paste operations at once: the second one used to
+        // overwrite the clipboard before the first simulated Ctrl+V fired,
+        // which silently lost items.
+        if (_pasteBusy)
             return;
 
-        await PasteRichAsync(item.Text, item.Html, () =>
+        _pasteBusy = true;
+
+        try
         {
+            ClipItem? item;
+
             lock (_sync)
             {
-                if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
-                {
-                    _items.Dequeue();
-                }
+                item = _items.Count > 0 ? _items.Peek() : null;
             }
-        });
+
+            if (item == null)
+                return;
+
+            await PasteRichAsync(item.Text, item.Html, false, () =>
+            {
+                lock (_sync)
+                {
+                    if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
+                    {
+                        _items.Dequeue();
+                    }
+                }
+            });
+        }
+        finally
+        {
+            _pasteBusy = false;
+        }
     }
 
     private async void PasteAll()
     {
-        ClipItem[] items;
+        if (_pasteBusy)
+            return;
 
-        lock (_sync)
+        _pasteBusy = true;
+
+        try
         {
-            if (_items.Count == 0)
-                return;
+            ClipItem[] items;
 
-            items = _items.ToArray();
-        }
-
-        string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
-            ? Environment.NewLine + Environment.NewLine
-            : _settings.PasteAllSeparator;
-
-        bool renderMarkdown = _settings.RenderMarkdownForPlainText;
-
-        var combined = await Task.Run(() =>
-        {
-            var textBuilder = new StringBuilder();
-            var htmlBuilder = new StringBuilder();
-
-            for (int i = 0; i < items.Length; i++)
-            {
-                ClipItem item = items[i];
-
-                textBuilder.Append(item.Text);
-
-                htmlBuilder.Append(
-                    string.IsNullOrWhiteSpace(item.Html)
-                        ? (renderMarkdown
-                            ? Markdown.ToHtml(item.Text, MarkdownPipeline)
-                            : HtmlClipboardHelper.PlainTextToHtml(item.Text))
-                        : item.Html);
-
-                if (i < items.Length - 1)
-                {
-                    textBuilder.Append(separator);
-                    htmlBuilder.Append("<p><br></p>");
-                }
-            }
-
-            return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
-        });
-
-        await PasteRichAsync(combined.Text, combined.Html, () =>
-        {
             lock (_sync)
             {
+                if (_items.Count == 0)
+                    return;
+
+                items = _items.ToArray();
+            }
+
+            string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
+                ? Environment.NewLine + Environment.NewLine
+                : _settings.PasteAllSeparator;
+
+            bool renderMarkdown = _settings.RenderMarkdownForPlainText;
+
+            var combined = await Task.Run(() =>
+            {
+                var textBuilder = new StringBuilder();
+                var htmlBuilder = new StringBuilder();
+
                 for (int i = 0; i < items.Length; i++)
                 {
-                    if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
+                    ClipItem item = items[i];
+
+                    textBuilder.Append(item.Text);
+
+                    htmlBuilder.Append(
+                        string.IsNullOrWhiteSpace(item.Html)
+                            ? (renderMarkdown
+                                ? Markdown.ToHtml(item.Text, MarkdownPipeline)
+                                : HtmlClipboardHelper.PlainTextToHtml(item.Text))
+                            : item.Html);
+
+                    if (i < items.Length - 1)
                     {
-                        _items.Dequeue();
-                    }
-                    else
-                    {
-                        break;
+                        textBuilder.Append(separator);
+                        htmlBuilder.Append("<p><br></p>");
                     }
                 }
-            }
-        });
+
+                return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
+            });
+
+            await PasteRichAsync(combined.Text, combined.Html, true, () =>
+            {
+                lock (_sync)
+                {
+                    for (int i = 0; i < items.Length; i++)
+                    {
+                        if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
+                        {
+                            _items.Dequeue();
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        finally
+        {
+            _pasteBusy = false;
+        }
     }
 
-    private async Task PasteRichAsync(string text, string? html, Action? onSuccess)
+    private async Task PasteRichAsync(string text, string? html, bool waitModifiers, Action? onSuccess)
     {
         try
         {
@@ -921,9 +949,13 @@ public sealed class MainForm : Form
             onSuccess?.Invoke();
             RefreshUi();
 
-            await Task.Delay(100);
+            // Single-item paste goes out immediately; only paste-all waits for
+            // modifier keys (Alt must be released, otherwise the simulated
+            // Ctrl+V would become Ctrl+Alt+V).
+            await Task.Delay(50);
 
-            NativeMethods.WaitForModifierKeysRelease();
+            if (waitModifiers)
+                NativeMethods.WaitForModifierKeysRelease();
 
             NativeMethods.SendCtrlV();
 
