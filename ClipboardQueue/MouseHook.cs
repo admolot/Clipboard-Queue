@@ -43,8 +43,10 @@ internal sealed class MouseHook : IDisposable
     /// <summary>
     /// Fired when the user clicks an item of a context menu
     /// (left button shortly after a right button release).
+    /// The argument is the clipboard sequence number captured synchronously
+    /// at the instant of the click.
     /// </summary>
-    public Action? MenuSelectClicked { get; set; }
+    public Action<uint>? MenuSelectClicked { get; set; }
 
     public MouseHook()
     {
@@ -82,7 +84,10 @@ internal sealed class MouseHook : IDisposable
                     if ((DateTime.UtcNow - _lastRightButtonUp).TotalSeconds < 10)
                     {
                         InputActivity.NoteGesture();
-                        MenuSelectClicked?.Invoke();
+
+                        // Capture synchronously, at the exact instant of the
+                        // click, so later comparisons are race-free.
+                        MenuSelectClicked?.Invoke(NativeMethods.GetClipboardSequenceNumber());
                     }
                     else
                     {
