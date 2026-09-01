@@ -118,11 +118,6 @@ internal static class NativeMethods
         public ushort wParamH;
     }
 
-    /// <summary>
-    /// Waits until Ctrl / Alt / Shift / Win and both mouse buttons are
-    /// physically released, then waits a short moment for things like
-    /// context menus / selection changes to settle.
-    /// </summary>
     public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 1500)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
