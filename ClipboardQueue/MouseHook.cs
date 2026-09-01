@@ -40,6 +40,12 @@ internal sealed class MouseHook : IDisposable
 
     private DateTime _lastRightButtonUp = DateTime.MinValue;
 
+    /// <summary>
+    /// Fired when the user clicks an item of a context menu
+    /// (left button shortly after a right button release).
+    /// </summary>
+    public Action? MenuSelectClicked { get; set; }
+
     public MouseHook()
     {
         _proc = HookCallback;
@@ -71,11 +77,12 @@ internal sealed class MouseHook : IDisposable
                 }
                 else if (msg == WM_LBUTTONDOWN)
                 {
-                    // A left click shortly after a right click almost always means
-                    // "user chose an item from a context menu" (e.g. Paste).
+                    // A left click shortly after a right click almost always
+                    // means "user chose an item from a context menu".
                     if ((DateTime.UtcNow - _lastRightButtonUp).TotalSeconds < 10)
                     {
                         InputActivity.NoteGesture();
+                        MenuSelectClicked?.Invoke();
                     }
                     else
                     {
