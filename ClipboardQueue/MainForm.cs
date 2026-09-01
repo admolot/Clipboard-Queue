@@ -28,17 +28,9 @@ public sealed class MainForm : Form
     private const int MaxItems = 500;
     private const int MaxItemLength = 50_000;
     private const int MaxHtmlLength = 1_000_000;
-
-    // Total stored characters (text + html) budget. If exceeded, the oldest
-    // items are dropped. Keeps memory (and therefore the app) light.
     private const long MaxTotalChars = 20_000_000;
-
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
-
-    // Give the target app time to finish its paste before we touch the
-    // clipboard again (re-arm). Without this delay, our OpenClipboard raced
-    // the target's OpenClipboard and the target pasted nothing.
     private const int SyncDelayMs = 300;
 
     private readonly Queue<ClipItem> _items = new();
@@ -63,12 +55,15 @@ public sealed class MainForm : Form
     private System.Windows.Forms.Timer? _clipboardTimer;
     private System.Windows.Forms.Timer? _renderConsumeTimer;
     private System.Windows.Forms.Timer? _syncTimer;
+    private System.Windows.Forms.Timer? _menuConfirmTimer;
     private uint _lastClipboardSequence;
+    private uint _menuConfirmSeq;
 
     private bool _armed;
     private bool _poisoned;
     private DateTime _armedAt = DateTime.MinValue;
     private DateTime _lastArmTime = DateTime.MinValue;
+    private DateTime _backgroundRenderAt = DateTime.MinValue;
     private ClipItem? _renderedItem;
 
     private bool _exitRequested;
@@ -78,14 +73,11 @@ public sealed class MainForm : Form
     private bool _updatingStartup;
     private bool _suppressCounter = true;
     private int _lastCount = -1;
-
-    // Prevents overlapping paste operations (which used to lose items).
     private bool _pasteBusy;
 
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
 
-    // Used to collapse held-Ctrl+C auto-repeat into a single stored item.
     private string _lastStoredText = string.Empty;
     private string? _lastStoredHtml;
     private DateTime _lastStoredTime = DateTime.MinValue;
@@ -100,7 +92,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.16";
+        Text = "Clipboard Queue 1.18";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -318,6 +310,13 @@ public sealed class MainForm : Form
             SyncClipboardOwnership();
         };
 
+        _menuConfirmTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 400
+        };
+
+        _menuConfirmTimer.Tick += (_, _) => OnMenuConfirmTick();
+
         try
         {
             _keyboardHook = new KeyboardHook
@@ -340,7 +339,10 @@ public sealed class MainForm : Form
 
         try
         {
-            _mouseHook = new MouseHook();
+            _mouseHook = new MouseHook
+            {
+                MenuSelectClicked = () => PostToUi(OnMenuSelect)
+            };
         }
         catch
         {
@@ -410,14 +412,45 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    /// <summary>
-    /// Delays clipboard (re)ownership so target apps always finish their
-    /// paste/copy before we open the clipboard again.
-    /// </summary>
     private void ScheduleSync()
     {
         _syncTimer?.Stop();
         _syncTimer?.Start();
+    }
+
+    private bool MenuFlowActive()
+    {
+        return _backgroundRenderAt > _armedAt &&
+               (DateTime.UtcNow - _backgroundRenderAt).TotalSeconds < 3;
+    }
+
+    /// <summary>
+    /// Called when the user clicks an item of a right-click context menu.
+    /// Apps like Anki read the clipboard when the menu OPENS (before the
+    /// click), which looks like a background read. If such a read happened
+    /// shortly before this menu click, treat the click as a paste - but only
+    /// if the clipboard did not change afterwards (otherwise the user chose
+    /// Copy/Cut).
+    /// </summary>
+    private void OnMenuSelect()
+    {
+        if (!MenuFlowActive())
+            return;
+
+        _menuConfirmSeq = NativeMethods.GetClipboardSequenceNumber();
+        _menuConfirmTimer?.Stop();
+        _menuConfirmTimer?.Start();
+    }
+
+    private void OnMenuConfirmTick()
+    {
+        _menuConfirmTimer?.Stop();
+
+        if (NativeMethods.GetClipboardSequenceNumber() != _menuConfirmSeq)
+            return;
+
+        _backgroundRenderAt = DateTime.MinValue;
+        ConsumeRenderedItem();
     }
 
     private void HandleRenderFormat(uint format)
@@ -450,14 +483,22 @@ public sealed class MainForm : Form
             }
 
             bool userInitiated = InputActivity.LastGesture > _armedAt;
+            bool menuFlow = MenuFlowActive();
 
             if (userInitiated)
             {
-                _renderConsumeTimer?.Stop();
-                _renderConsumeTimer?.Start();
+                // In a menu flow the consumption is handled by the menu-click
+                // confirmation, so don't consume twice.
+                if (!menuFlow)
+                {
+                    _renderConsumeTimer?.Stop();
+                    _renderConsumeTimer?.Start();
+                }
             }
             else
             {
+                _backgroundRenderAt = DateTime.UtcNow;
+
                 if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
                 {
                     PostToUi(ScheduleSync);
@@ -484,6 +525,7 @@ public sealed class MainForm : Form
             return;
 
         _renderedItem = null;
+        _backgroundRenderAt = DateTime.MinValue;
 
         lock (_sync)
         {
@@ -618,9 +660,6 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Held Ctrl+C produces many identical copies in a row (auto-repeat).
-        // Store only one item for them; the window slides while repeats keep
-        // arriving, so even a long hold stores a single item.
         if (text == _lastStoredText &&
             html == _lastStoredHtml &&
             (DateTime.UtcNow - _lastStoredTime).TotalSeconds < RepeatCopyWindowSeconds)
@@ -823,7 +862,6 @@ public sealed class MainForm : Form
 
     private async void PasteNext()
     {
-        // Never allow two paste operations at once.
         if (_pasteBusy)
             return;
 
@@ -981,7 +1019,6 @@ public sealed class MainForm : Form
 
             NativeMethods.SendCtrlV();
 
-            // Re-arm only AFTER the target app had time to finish its paste.
             _renderedItem = null;
             ScheduleSync();
         }
@@ -1041,6 +1078,9 @@ public sealed class MainForm : Form
 
             _syncTimer?.Stop();
             _syncTimer?.Dispose();
+
+            _menuConfirmTimer?.Stop();
+            _menuConfirmTimer?.Dispose();
         }
         catch
         {
