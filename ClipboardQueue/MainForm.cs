@@ -33,8 +33,7 @@ public sealed class MainForm : Form
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
-    private const double GestureFreshnessMs = 2000;
-    private const double ConsumeCooldownMs = 500;
+    private const double CustomMenuWindowSeconds = 2.0;
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
@@ -57,17 +56,14 @@ public sealed class MainForm : Form
     private SynchronizationContext? _uiContext;
 
     private System.Windows.Forms.Timer? _clipboardTimer;
-    private System.Windows.Forms.Timer? _renderConsumeTimer;
     private System.Windows.Forms.Timer? _syncTimer;
+    private System.Windows.Forms.Timer? _menuConfirmTimer;
     private uint _lastClipboardSequence;
+    private uint _menuConfirmSeq;
+    private int _confirmStage;
 
     private bool _armed;
-    private bool _poisoned;
     private DateTime _armedAt = DateTime.MinValue;
-    private DateTime _lastArmTime = DateTime.MinValue;
-    private DateTime _backgroundRenderAt = DateTime.MinValue;
-    private DateTime _consumeCooldownUntil = DateTime.MinValue;
-    private ClipItem? _renderedItem;
 
     private bool _exitRequested;
     private bool _cleanedUp;
@@ -77,6 +73,9 @@ public sealed class MainForm : Form
     private bool _suppressCounter = true;
     private int _lastCount = -1;
     private bool _pasteBusy;
+
+    private long _consumedCount;
+    private long _confirmConsumedCount;
 
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
@@ -95,7 +94,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.26";
+        Text = "Clipboard Queue 1.27";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -304,13 +303,6 @@ public sealed class MainForm : Form
         _clipboardTimer.Tick += (_, _) => OnClipboardUpdate();
         _clipboardTimer.Start();
 
-        _renderConsumeTimer = new System.Windows.Forms.Timer
-        {
-            Interval = 250
-        };
-
-        _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
-
         _syncTimer = new System.Windows.Forms.Timer
         {
             Interval = SyncDelayMs
@@ -322,12 +314,18 @@ public sealed class MainForm : Form
             SyncClipboardOwnership();
         };
 
+        _menuConfirmTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 400
+        };
+
+        _menuConfirmTimer.Tick += (_, _) => OnMenuConfirmTick();
+
         try
         {
             _keyboardHook = new KeyboardHook
             {
-                ShouldHandleCtrlV = () =>
-                    _settings.OverrideCtrlV && GetCount() > 0 && (!_armed || _poisoned),
+                ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0,
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
                 CtrlAltVPressed = () => PostToUi(PasteAll)
@@ -344,7 +342,10 @@ public sealed class MainForm : Form
 
         try
         {
-            _mouseHook = new MouseHook();
+            _mouseHook = new MouseHook
+            {
+                LeftClickAfterRightClick = (seq, isMenu) => PostToUi(() => OnLeftClick(seq, isMenu))
+            };
         }
         catch
         {
@@ -371,19 +372,6 @@ public sealed class MainForm : Form
         {
             _armed = false;
             base.WndProc(ref m);
-            return;
-        }
-
-        if (m.Msg == NativeClipboard.WM_RENDERFORMAT)
-        {
-            HandleRenderFormat((uint)m.WParam.ToInt64());
-            return;
-        }
-
-        if (m.Msg == NativeClipboard.WM_RENDERALLFORMATS)
-        {
-            HandleRenderFormat(NativeClipboard.CF_UNICODETEXT);
-            HandleRenderFormat(NativeClipboard.CfHtml);
             return;
         }
 
@@ -453,101 +441,118 @@ public sealed class MainForm : Form
         _syncTimer?.Start();
     }
 
-    private void HandleRenderFormat(uint format)
+    // ------------------------------------------------------------------
+    // Mouse-paste consumption: two-step confirmation.
+    // ------------------------------------------------------------------
+
+    private void OnLeftClick(uint clickSeq, bool isMenu)
     {
+        if (GetCount() == 0)
+            return;
+
+        if (isMenu)
+        {
+            StartConfirm(clickSeq, "MENUSELECT");
+            return;
+        }
+
+        // Custom-drawn menus (Anki etc.): a left click shortly after a right
+        // click is very likely the menu choice.
+        if ((DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds)
+        {
+            StartConfirm(clickSeq, "CUSTOMSELECT");
+        }
+    }
+
+    private void StartConfirm(uint clickSeq, string tag)
+    {
+        _menuConfirmSeq = clickSeq;
+        _confirmConsumedCount = _consumedCount;
+        _confirmStage = 0;
+        _menuConfirmTimer?.Stop();
+        _menuConfirmTimer?.Start();
+
+        Diag($"{tag} seq={clickSeq}");
+    }
+
+    private void OnMenuConfirmTick()
+    {
+        uint seqNow = NativeMethods.GetClipboardSequenceNumber();
+
+        // Clipboard changed since the click => user chose Copy/Cut.
+        if (seqNow != _menuConfirmSeq)
+        {
+            Diag("CONFIRM cancel: clipboard changed");
+            _menuConfirmTimer?.Stop();
+            return;
+        }
+
+        if (_consumedCount != _confirmConsumedCount)
+        {
+            Diag("CONFIRM cancel: already consumed");
+            _menuConfirmTimer?.Stop();
+            return;
+        }
+
+        if (_confirmStage == 0)
+        {
+            _confirmStage = 1;
+            _menuConfirmTimer?.Stop();
+            _menuConfirmTimer?.Start();
+            Diag("CONFIRM stage1");
+            return;
+        }
+
+        // Final safety: the clipboard text must still equal the queued item.
+        string? headText;
+
+        lock (_sync)
+        {
+            headText = _items.Count > 0 ? _items.Peek().Text : null;
+        }
+
+        string? clipText = null;
+
         try
         {
-            ClipItem? item;
-
-            lock (_sync)
-            {
-                item = _renderedItem ?? (_items.Count > 0 ? _items.Peek() : null);
-            }
-
-            if (item == null)
-                return;
-
-            _renderedItem = item;
-
-            if (format == NativeClipboard.CF_UNICODETEXT)
-            {
-                NativeClipboard.ProvideData(
-                    format,
-                    Encoding.Unicode.GetBytes(item.Text + "\0"));
-            }
-            else if (format == NativeClipboard.CfHtml)
-            {
-                NativeClipboard.ProvideData(
-                    format,
-                    Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
-            }
-            else
-            {
-                return;
-            }
-
-            // A read is a REAL PASTE when the user's last click/keypress happened
-            // AFTER we armed the clipboard (probe reads that follow every copy
-            // always have a gesture OLDER than the arm). Works for text-only
-            // apps (Notepad, fmt 13) and HTML-only apps (Anki, fmt CfHtml).
-            bool pasteRead =
-                InputActivity.LastGesture > _armedAt &&
-                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
-                DateTime.UtcNow >= _consumeCooldownUntil;
-
-            Diag($"RENDER fmt={format} pasteRead={pasteRead} " +
-                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds}");
-
-            if (pasteRead)
-            {
-                _renderConsumeTimer?.Stop();
-                _renderConsumeTimer?.Start();
-            }
-            else
-            {
-                _backgroundRenderAt = DateTime.UtcNow;
-
-                if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
-                {
-                    PostToUi(ScheduleSync);
-                }
-                else
-                {
-                    _poisoned = true;
-                    _armed = false;
-                    Diag("POISON");
-                }
-            }
+            if (Clipboard.ContainsText())
+                clipText = Clipboard.GetText();
         }
         catch
         {
         }
+
+        if (headText == null || clipText == null || clipText != headText)
+        {
+            Diag("CONFIRM cancel: content mismatch");
+            _menuConfirmTimer?.Stop();
+            return;
+        }
+
+        Diag("CONFIRM consume");
+        _menuConfirmTimer?.Stop();
+        ConsumeHead();
     }
 
-    private void ConsumeRenderedItem()
+    private void ConsumeHead()
     {
-        _renderConsumeTimer?.Stop();
-
-        ClipItem? rendered = _renderedItem;
-
-        if (rendered == null)
-            return;
-
-        _renderedItem = null;
-        _consumeCooldownUntil = DateTime.UtcNow.AddMilliseconds(ConsumeCooldownMs);
-
         lock (_sync)
         {
-            if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
+            if (_items.Count > 0)
             {
                 _items.Dequeue();
-                Diag($"CONSUME render count={_items.Count}");
+                _consumedCount++;
+                Diag($"CONSUME confirm count={_items.Count}");
             }
         }
 
         RefreshUi();
         ScheduleSync();
     }
+
+    // ------------------------------------------------------------------
+    // Clipboard ownership: REAL data (works for Win32 and OLE readers).
+    // ------------------------------------------------------------------
 
     private void SyncClipboardOwnership()
     {
@@ -558,15 +563,29 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (NativeClipboard.ArmDelayed(Handle))
+        ClipItem? head;
+
+        lock (_sync)
+        {
+            head = _items.Peek();
+        }
+
+        if (head == null)
+            return;
+
+        string htmlData = HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head));
+
+        if (NativeClipboard.TrySetHtmlAndText(head.Text, htmlData))
         {
             _armed = true;
-            _poisoned = false;
             _armedAt = DateTime.UtcNow;
-            _lastArmTime = DateTime.UtcNow;
-            _renderedItem = null;
+
+            // Do not re-store our own clipboard write as a new item.
+            _lastProgrammaticClipboardText = head.Text;
+            _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-            Diag("ARM");
+
+            Diag("ARM real");
         }
     }
 
@@ -587,7 +606,7 @@ public sealed class MainForm : Form
             html = HtmlClipboardHelper.PlainTextToHtml(item.Text);
         }
 
-        return HtmlClipboardHelper.CreateHtmlClipboardData(html);
+        return html;
     }
 
     private static long SizeOf(ClipItem item)
@@ -898,6 +917,7 @@ public sealed class MainForm : Form
                     if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
                     {
                         _items.Dequeue();
+                        _consumedCount++;
                         Diag($"CONSUME key count={_items.Count}");
                     }
                 }
@@ -925,7 +945,7 @@ public sealed class MainForm : Form
                 if (_items.Count == 0)
                     return;
 
-                items = _items.ToArray();
+                    items = _items.ToArray();
             }
 
             string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
@@ -971,6 +991,7 @@ public sealed class MainForm : Form
                         if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
                         {
                             _items.Dequeue();
+                            _consumedCount++;
                         }
                         else
                         {
@@ -1034,7 +1055,6 @@ public sealed class MainForm : Form
 
             NativeMethods.SendCtrlV();
 
-            _renderedItem = null;
             ScheduleSync();
         }
         catch
@@ -1088,11 +1108,11 @@ public sealed class MainForm : Form
             _clipboardTimer?.Stop();
             _clipboardTimer?.Dispose();
 
-            _renderConsumeTimer?.Stop();
-            _renderConsumeTimer?.Dispose();
-
             _syncTimer?.Stop();
             _syncTimer?.Dispose();
+
+            _menuConfirmTimer?.Stop();
+            _menuConfirmTimer?.Dispose();
         }
         catch
         {
