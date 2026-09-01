@@ -55,13 +55,16 @@ internal sealed class MouseHook : IDisposable
     private bool _disposed;
 
     private DateTime _lastRightButtonUp = DateTime.MinValue;
+    private int _leftClicksSinceRight;
 
     /// <summary>
     /// Fired when the user left-clicks shortly after a right click.
-    /// Arguments: clipboard sequence at click time, and whether the click
-    /// landed on a real system context menu (window class "#32768").
+    /// Arguments:
+    ///   clipboard sequence at click time,
+    ///   whether the click landed on a real system menu ("#32768"),
+    ///   whether it is the FIRST left click since the right click.
     /// </summary>
-    public Action<uint, bool>? LeftClickAfterRightClick { get; set; }
+    public Action<uint, bool, bool>? LeftClickAfterRightClick { get; set; }
 
     public MouseHook()
     {
@@ -90,6 +93,7 @@ internal sealed class MouseHook : IDisposable
                 if (msg == WM_RBUTTONUP)
                 {
                     _lastRightButtonUp = DateTime.UtcNow;
+                    _leftClicksSinceRight = 0;
                     InputActivity.NoteRightButtonUp();
                     InputActivity.Note();
                 }
@@ -97,6 +101,9 @@ internal sealed class MouseHook : IDisposable
                 {
                     if ((DateTime.UtcNow - _lastRightButtonUp).TotalSeconds < 10)
                     {
+                        _leftClicksSinceRight++;
+                        bool firstAfterRight = _leftClicksSinceRight == 1;
+
                         bool menuWindow = IsMenuWindowUnderCursor(lParam);
 
                         if (menuWindow)
@@ -110,7 +117,8 @@ internal sealed class MouseHook : IDisposable
 
                         LeftClickAfterRightClick?.Invoke(
                             NativeMethods.GetClipboardSequenceNumber(),
-                            menuWindow);
+                            menuWindow,
+                            firstAfterRight);
                     }
                     else
                     {
