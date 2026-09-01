@@ -8,11 +8,17 @@ public sealed class AppSettings
 {
     public string PasteAllSeparator { get; set; } = Environment.NewLine + Environment.NewLine;
 
+    // If true, Ctrl+V pastes the oldest queued item whenever the queue is not empty.
     public bool OverrideCtrlV { get; set; } = true;
 
+    // If true, plain-text copies (no HTML) are rendered as Markdown.
     public bool RenderMarkdownForPlainText { get; set; } = false;
 
-    // Set to false to stop writing diagnostics.log.
+    // If true, the app owns the clipboard while the queue is not empty,
+    // so any paste method (keyboard, right-click menu) pastes the oldest item.
+    public bool InterceptAllPastes { get; set; } = true;
+
+    // If true, diagnostics.log is written.
     public bool Diagnostics { get; set; } = true;
 }
 
@@ -23,12 +29,9 @@ public static class SettingsManager
         WriteIndented = true
     };
 
-    private static string SettingsDirectory =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "ClipboardQueue");
-
-    private static string SettingsPath => Path.Combine(SettingsDirectory, "settings.json");
+    // Portable: everything is stored next to the executable.
+    private static string SettingsPath =>
+        Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     public static AppSettings Load()
     {
@@ -60,7 +63,6 @@ public static class SettingsManager
     {
         try
         {
-            Directory.CreateDirectory(SettingsDirectory);
             File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, Options));
         }
         catch
