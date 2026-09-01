@@ -32,8 +32,6 @@ public sealed class MainForm : Form
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
-
-    // A clipboard read counts as a real paste only if its gesture is recent.
     private const double GestureFreshnessMs = 800;
 
     private readonly Queue<ClipItem> _items = new();
@@ -99,7 +97,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.19";
+        Text = "Clipboard Queue 1.20";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -348,7 +346,7 @@ public sealed class MainForm : Form
         {
             _mouseHook = new MouseHook
             {
-                MenuSelectClicked = () => PostToUi(OnMenuSelect)
+                MenuSelectClicked = clickSeq => PostToUi(() => OnMenuSelect(clickSeq))
             };
         }
         catch
@@ -433,18 +431,16 @@ public sealed class MainForm : Form
 
     /// <summary>
     /// Called when the user clicks an item of a right-click context menu.
-    /// Apps like Anki read the clipboard when the menu OPENS (before the
-    /// click), which looks like a background read. If such a read happened
-    /// shortly before this menu click, treat the click as a paste - but only
-    /// if the clipboard did not change afterwards (otherwise the user chose
-    /// Copy/Cut) and nothing was consumed in the meantime.
+    /// clickSeq is the clipboard sequence captured synchronously at the instant
+    /// of the click. If the clipboard changes after the click, the user chose
+    /// Copy/Cut; if it stays the same, it was a Paste.
     /// </summary>
-    private void OnMenuSelect()
+    private void OnMenuSelect(uint clickSeq)
     {
         if (!MenuFlowActive())
             return;
 
-        _menuConfirmSeq = NativeMethods.GetClipboardSequenceNumber();
+        _menuConfirmSeq = clickSeq;
         _confirmConsumedCount = _consumedCount;
         _menuConfirmTimer?.Stop();
         _menuConfirmTimer?.Start();
@@ -483,10 +479,6 @@ public sealed class MainForm : Form
 
             uint seqNow = NativeMethods.GetClipboardSequenceNumber();
 
-            // A read is a REAL paste only when:
-            //  - its gesture happened after we armed,
-            //  - the gesture is fresh (<= 800 ms ago),
-            //  - the clipboard did not change between gesture and read.
             bool userInitiated =
                 InputActivity.LastGesture > _armedAt &&
                 (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
@@ -509,8 +501,6 @@ public sealed class MainForm : Form
 
             if (userInitiated)
             {
-                // In a menu flow the consumption is handled by the menu-click
-                // confirmation, so don't consume twice.
                 if (!menuFlow)
                 {
                     _renderConsumeTimer?.Stop();
