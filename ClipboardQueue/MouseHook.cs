@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace ClipboardQueue;
 
@@ -13,6 +14,8 @@ internal sealed class MouseHook : IDisposable
     private const int WM_RBUTTONUP = 0x0205;
     private const int WM_MBUTTONDOWN = 0x0207;
     private const int WM_XBUTTONDOWN = 0x020B;
+
+    private const string MenuWindowClass = "#32768";
 
     private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -34,6 +37,19 @@ internal sealed class MouseHook : IDisposable
         IntPtr wParam,
         IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT pt);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int x;
+        public int y;
+    }
+
     private readonly LowLevelMouseProc _proc;
     private readonly IntPtr _hookId;
     private bool _disposed;
@@ -41,12 +57,11 @@ internal sealed class MouseHook : IDisposable
     private DateTime _lastRightButtonUp = DateTime.MinValue;
 
     /// <summary>
-    /// Fired when the user clicks an item of a context menu
-    /// (left button shortly after a right button release).
-    /// The argument is the clipboard sequence number captured synchronously
-    /// at the instant of the click.
+    /// Fired when the user left-clicks shortly after a right click.
+    /// Arguments: clipboard sequence at click time, and whether the click
+    /// landed on a real system context menu (window class "#32768").
     /// </summary>
-    public Action<uint>? MenuSelectClicked { get; set; }
+    public Action<uint, bool>? LeftClickAfterRightClick { get; set; }
 
     public MouseHook()
     {
@@ -79,15 +94,22 @@ internal sealed class MouseHook : IDisposable
                 }
                 else if (msg == WM_LBUTTONDOWN)
                 {
-                    // A left click shortly after a right click almost always
-                    // means "user chose an item from a context menu".
                     if ((DateTime.UtcNow - _lastRightButtonUp).TotalSeconds < 10)
                     {
-                        InputActivity.NoteGesture();
+                        bool menuWindow = IsMenuWindowUnderCursor(lParam);
 
-                        // Capture synchronously, at the exact instant of the
-                        // click, so later comparisons are race-free.
-                        MenuSelectClicked?.Invoke(NativeMethods.GetClipboardSequenceNumber());
+                        if (menuWindow)
+                        {
+                            InputActivity.NoteGesture();
+                        }
+                        else
+                        {
+                            InputActivity.Note();
+                        }
+
+                        LeftClickAfterRightClick?.Invoke(
+                            NativeMethods.GetClipboardSequenceNumber(),
+                            menuWindow);
                     }
                     else
                     {
@@ -106,6 +128,32 @@ internal sealed class MouseHook : IDisposable
         }
 
         return CallNextHookEx(_hookId, nCode, wParam, lParam);
+    }
+
+    private static bool IsMenuWindowUnderCursor(IntPtr lParam)
+    {
+        try
+        {
+            POINT pt;
+            pt.x = Marshal.ReadInt32(lParam, 0);
+            pt.y = Marshal.ReadInt32(lParam, 4);
+
+            IntPtr hwnd = WindowFromPoint(pt);
+
+            if (hwnd == IntPtr.Zero)
+                return false;
+
+            var sb = new StringBuilder(32);
+
+            if (GetClassName(hwnd, sb, sb.Capacity) == 0)
+                return false;
+
+            return sb.ToString() == MenuWindowClass;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public void Dispose()
