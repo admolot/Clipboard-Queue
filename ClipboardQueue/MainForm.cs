@@ -33,6 +33,9 @@ public sealed class MainForm : Form
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
 
+    // A clipboard read counts as a real paste only if its gesture is recent.
+    private const double GestureFreshnessMs = 800;
+
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
 
@@ -75,6 +78,10 @@ public sealed class MainForm : Form
     private int _lastCount = -1;
     private bool _pasteBusy;
 
+    // Double-consume guard: total consumptions so far.
+    private long _consumedCount;
+    private long _confirmConsumedCount;
+
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
 
@@ -92,7 +99,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.18";
+        Text = "Clipboard Queue 1.19";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -430,7 +437,7 @@ public sealed class MainForm : Form
     /// click), which looks like a background read. If such a read happened
     /// shortly before this menu click, treat the click as a paste - but only
     /// if the clipboard did not change afterwards (otherwise the user chose
-    /// Copy/Cut).
+    /// Copy/Cut) and nothing was consumed in the meantime.
     /// </summary>
     private void OnMenuSelect()
     {
@@ -438,6 +445,7 @@ public sealed class MainForm : Form
             return;
 
         _menuConfirmSeq = NativeMethods.GetClipboardSequenceNumber();
+        _confirmConsumedCount = _consumedCount;
         _menuConfirmTimer?.Stop();
         _menuConfirmTimer?.Start();
     }
@@ -446,11 +454,15 @@ public sealed class MainForm : Form
     {
         _menuConfirmTimer?.Stop();
 
+        // Clipboard changed since the click => user chose Copy/Cut.
         if (NativeMethods.GetClipboardSequenceNumber() != _menuConfirmSeq)
             return;
 
-        _backgroundRenderAt = DateTime.MinValue;
-        ConsumeRenderedItem();
+        // A render-based consumption already happened => don't consume twice.
+        if (_consumedCount != _confirmConsumedCount)
+            return;
+
+        ConsumeHead();
     }
 
     private void HandleRenderFormat(uint format)
@@ -469,6 +481,19 @@ public sealed class MainForm : Form
 
             _renderedItem = item;
 
+            uint seqNow = NativeMethods.GetClipboardSequenceNumber();
+
+            // A read is a REAL paste only when:
+            //  - its gesture happened after we armed,
+            //  - the gesture is fresh (<= 800 ms ago),
+            //  - the clipboard did not change between gesture and read.
+            bool userInitiated =
+                InputActivity.LastGesture > _armedAt &&
+                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
+                InputActivity.LastGestureSeq == seqNow;
+
+            bool menuFlow = MenuFlowActive();
+
             if (format == NativeClipboard.CF_UNICODETEXT)
             {
                 NativeClipboard.ProvideData(
@@ -481,9 +506,6 @@ public sealed class MainForm : Form
                     format,
                     Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             }
-
-            bool userInitiated = InputActivity.LastGesture > _armedAt;
-            bool menuFlow = MenuFlowActive();
 
             if (userInitiated)
             {
@@ -525,15 +547,35 @@ public sealed class MainForm : Form
             return;
 
         _renderedItem = null;
-        _backgroundRenderAt = DateTime.MinValue;
 
         lock (_sync)
         {
             if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
             {
                 _items.Dequeue();
+                _consumedCount++;
             }
         }
+
+        _backgroundRenderAt = DateTime.MinValue;
+
+        RefreshUi();
+        ScheduleSync();
+    }
+
+    private void ConsumeHead()
+    {
+        lock (_sync)
+        {
+            if (_items.Count > 0)
+            {
+                _items.Dequeue();
+                _consumedCount++;
+            }
+        }
+
+        _renderedItem = null;
+        _backgroundRenderAt = DateTime.MinValue;
 
         RefreshUi();
         ScheduleSync();
@@ -886,6 +928,7 @@ public sealed class MainForm : Form
                     if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
                     {
                         _items.Dequeue();
+                        _consumedCount++;
                     }
                 }
             });
@@ -958,6 +1001,7 @@ public sealed class MainForm : Form
                         if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
                         {
                             _items.Dequeue();
+                            _consumedCount++;
                         }
                         else
                         {
