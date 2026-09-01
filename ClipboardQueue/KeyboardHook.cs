@@ -42,18 +42,6 @@ internal sealed class KeyboardHook : IDisposable
         {
             if (nCode >= 0)
             {
-                if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
-                    wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
-                {
-                    int vk = Marshal.ReadInt32(lParam);
-                    bool ctrl = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
-
-                    if (ctrl && vk == NativeMethods.VK_V)
-                        InputActivity.NoteGesture();
-                    else
-                        InputActivity.Note();
-                }
-
                 int vkCode = Marshal.ReadInt32(lParam);
                 int flags = Marshal.ReadInt32(lParam, 8);
 
@@ -64,10 +52,6 @@ internal sealed class KeyboardHook : IDisposable
                 {
                     bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
 
-                    // Held Ctrl+V: the FIRST press uses our queue logic below;
-                    // every auto-repeat press is passed through untouched, so
-                    // the target app repeats the current clipboard content
-                    // natively (e.g. "111111...") without draining the queue.
                     if (vkCode == NativeMethods.VK_V && ctrlDown && !keyUp)
                     {
                         bool isRepeat = _vKeyActive;
@@ -75,8 +59,18 @@ internal sealed class KeyboardHook : IDisposable
 
                         if (isRepeat)
                         {
+                            // Auto-repeat: not a new gesture; pass through so the
+                            // target repeats the current clipboard natively.
+                            InputActivity.Note();
                             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
                         }
+
+                        InputActivity.NoteGesture();
+                    }
+                    else if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
+                             wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
+                    {
+                        InputActivity.Note();
                     }
 
                     if (vkCode == NativeMethods.VK_V)
@@ -89,9 +83,6 @@ internal sealed class KeyboardHook : IDisposable
                             if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                                 wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
                             {
-                                // Ctrl+Alt+V -> paste all
-                                // Ctrl+V while holding LEFT mouse button -> paste all
-                                // Ctrl+V -> paste next
                                 if (altDown || leftMouseDown)
                                 {
                                     if (ShouldHandleCtrlAltV?.Invoke() == true)
