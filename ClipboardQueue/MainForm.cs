@@ -33,13 +33,7 @@ public sealed class MainForm : Form
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
-
-    // A CF_UNICODETEXT read counts as a paste only if a click/keypress
-    // happened within this window before it.
     private const double GestureFreshnessMs = 2000;
-
-    // After a consumption, ignore further paste-reads for this long so that
-    // one paste (or a held Ctrl+V) cannot consume several items.
     private const double ConsumeCooldownMs = 500;
 
     private readonly Queue<ClipItem> _items = new();
@@ -52,6 +46,7 @@ public sealed class MainForm : Form
     private readonly Label _countLabel;
     private readonly CheckBox _pauseCheckBox;
     private readonly CheckBox _startupCheckBox;
+    private readonly CheckBox _loggingCheckBox;
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _pauseMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
@@ -100,7 +95,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.24";
+        Text = "Clipboard Queue 1.25";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -186,6 +181,14 @@ public sealed class MainForm : Form
         };
         _startupCheckBox.CheckedChanged += (_, _) => SetStartWithWindows(_startupCheckBox.Checked);
 
+        _loggingCheckBox = new CheckBox
+        {
+            Text = "Logging",
+            AutoSize = true,
+            Checked = _settings.Diagnostics
+        };
+        _loggingCheckBox.CheckedChanged += (_, _) => SetLogging(_loggingCheckBox.Checked);
+
         _countLabel = new Label
         {
             AutoSize = true,
@@ -200,6 +203,7 @@ public sealed class MainForm : Form
         buttonPanel.Controls.Add(minimizeToTrayButton);
         buttonPanel.Controls.Add(_pauseCheckBox);
         buttonPanel.Controls.Add(_startupCheckBox);
+        buttonPanel.Controls.Add(_loggingCheckBox);
         buttonPanel.Controls.Add(_countLabel);
 
         root.Controls.Add(_listView, 0, 0);
@@ -410,6 +414,18 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
+    private void SetLogging(bool value)
+    {
+        if (_settings.Diagnostics == value)
+            return;
+
+        _settings.Diagnostics = value;
+        SettingsManager.Save(_settings);
+
+        if (value)
+            Diag("LOGGING ON");
+    }
+
     private void Diag(string message)
     {
         if (!_settings.Diagnostics)
@@ -417,13 +433,7 @@ public sealed class MainForm : Form
 
         try
         {
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "ClipboardQueue");
-
-            Directory.CreateDirectory(dir);
-
-            string path = Path.Combine(dir, "diagnostics.log");
+            string path = Path.Combine(AppContext.BaseDirectory, "diagnostics.log");
 
             var info = new FileInfo(path);
 
@@ -481,20 +491,16 @@ public sealed class MainForm : Form
             }
             else
             {
-                // Unknown format probe: nothing else to do.
                 return;
             }
 
             if (isTextRead && freshGesture && !inCooldown)
             {
-                // An app requested the text right after a user action:
-                // this is a paste (keyboard or any mouse menu).
                 _renderConsumeTimer?.Stop();
                 _renderConsumeTimer?.Start();
             }
             else
             {
-                // Background probe (or repeat/hold): never consume.
                 _backgroundRenderAt = DateTime.UtcNow;
 
                 if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
