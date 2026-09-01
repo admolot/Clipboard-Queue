@@ -34,6 +34,7 @@ public sealed class MainForm : Form
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
     private const double GestureFreshnessMs = 800;
+    private const double ExpectWindowMs = 700;
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
@@ -67,6 +68,7 @@ public sealed class MainForm : Form
     private DateTime _armedAt = DateTime.MinValue;
     private DateTime _lastArmTime = DateTime.MinValue;
     private DateTime _backgroundRenderAt = DateTime.MinValue;
+    private DateTime _expectUntil = DateTime.MinValue;
     private ClipItem? _renderedItem;
 
     private bool _exitRequested;
@@ -98,7 +100,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.21";
+        Text = "Clipboard Queue 1.22";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -347,7 +349,7 @@ public sealed class MainForm : Form
         {
             _mouseHook = new MouseHook
             {
-                MenuSelectClicked = clickSeq => PostToUi(() => OnMenuSelect(clickSeq))
+                LeftClickAfterRightClick = (seq, isMenu) => PostToUi(() => OnLeftClick(seq, isMenu))
             };
         }
         catch
@@ -418,10 +420,6 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    // ------------------------------------------------------------------
-    // Temporary diagnostics
-    // ------------------------------------------------------------------
-
     private static void Diag(string message)
     {
         try
@@ -458,6 +456,29 @@ public sealed class MainForm : Form
                (DateTime.UtcNow - _backgroundRenderAt).TotalSeconds < 3;
     }
 
+    /// <summary>
+    /// Left click shortly after a right click.
+    /// isMenu == true  : click on a real system menu (Notepad etc.) ->
+    ///                   run the paste confirmation.
+    /// isMenu == false : click inside the app (e.g. selecting text, or a
+    ///                   custom menu like Anki's) -> only open a short
+    ///                   "expect a paste read" window.
+    /// </summary>
+    private void OnLeftClick(uint clickSeq, bool isMenu)
+    {
+        if (isMenu)
+        {
+            OnMenuSelect(clickSeq);
+            return;
+        }
+
+        if (MenuFlowActive())
+        {
+            _expectUntil = DateTime.UtcNow.AddMilliseconds(ExpectWindowMs);
+            Diag("EXPECT open");
+        }
+    }
+
     private void OnMenuSelect(uint clickSeq)
     {
         if (!MenuFlowActive())
@@ -476,7 +497,6 @@ public sealed class MainForm : Form
     {
         uint seqNow = NativeMethods.GetClipboardSequenceNumber();
 
-        // Clipboard changed since the click => Copy/Cut (even a slow one).
         if (seqNow != _menuConfirmSeq)
         {
             Diag("CONFIRM cancel: clipboard changed");
@@ -493,7 +513,6 @@ public sealed class MainForm : Form
 
         if (_confirmStage == 0)
         {
-            // Second, later check: gives a slow Copy/Cut time to land.
             _confirmStage = 1;
             _menuConfirmTimer?.Stop();
             _menuConfirmTimer?.Start();
@@ -501,7 +520,6 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Final safety: the clipboard text must still equal the queued item.
         string? headText;
 
         lock (_sync)
@@ -556,8 +574,9 @@ public sealed class MainForm : Form
                 InputActivity.LastGestureSeq == seqNow;
 
             bool menuFlow = MenuFlowActive();
+            bool expecting = DateTime.UtcNow < _expectUntil;
 
-            Diag($"RENDER {(userInitiated ? "user" : "bg")} fmt={format} " +
+            Diag($"RENDER {(userInitiated ? "user" : "bg")} fmt={format} expect={expecting} " +
                  $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds} " +
                  $"gseq={InputActivity.LastGestureSeq} seq={seqNow}");
 
@@ -585,6 +604,16 @@ public sealed class MainForm : Form
             else
             {
                 _backgroundRenderAt = DateTime.UtcNow;
+
+                // Custom-menu apps (Anki): a read right after a left click
+                // means the user actually chose Paste.
+                if (expecting)
+                {
+                    _expectUntil = DateTime.MinValue;
+                    _renderConsumeTimer?.Stop();
+                    _renderConsumeTimer?.Start();
+                    Diag("EXPECT consume scheduled");
+                }
 
                 if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
                 {
@@ -746,6 +775,9 @@ public sealed class MainForm : Form
             }
 
             _lastClipboardSequence = current;
+
+            // A new copy invalidates any pending paste expectation.
+            _expectUntil = DateTime.MinValue;
 
             AddClipboardItem(text, html);
         }
