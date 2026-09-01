@@ -90,6 +90,7 @@ internal sealed class MouseHook : IDisposable
                 if (msg == WM_RBUTTONUP)
                 {
                     _lastRightButtonUp = DateTime.UtcNow;
+                    InputActivity.NoteRightButtonUp();
                     InputActivity.Note();
                 }
                 else if (msg == WM_LBUTTONDOWN)
