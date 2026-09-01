@@ -35,6 +35,7 @@ public sealed class MainForm : Form
     private const int SyncDelayMs = 300;
     private const double GestureFreshnessMs = 800;
     private const double ExpectWindowMs = 700;
+    private const double CustomMenuReadWindowMs = 400;
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
@@ -69,6 +70,7 @@ public sealed class MainForm : Form
     private DateTime _lastArmTime = DateTime.MinValue;
     private DateTime _backgroundRenderAt = DateTime.MinValue;
     private DateTime _expectUntil = DateTime.MinValue;
+    private DateTime _customMenuArmedAt = DateTime.MinValue;
     private ClipItem? _renderedItem;
 
     private bool _exitRequested;
@@ -100,7 +102,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.22";
+        Text = "Clipboard Queue 1.23";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -456,19 +458,28 @@ public sealed class MainForm : Form
                (DateTime.UtcNow - _backgroundRenderAt).TotalSeconds < 3;
     }
 
-    /// <summary>
-    /// Left click shortly after a right click.
-    /// isMenu == true  : click on a real system menu (Notepad etc.) ->
-    ///                   run the paste confirmation.
-    /// isMenu == false : click inside the app (e.g. selecting text, or a
-    ///                   custom menu like Anki's) -> only open a short
-    ///                   "expect a paste read" window.
-    /// </summary>
+    private bool CustomMenuFlowActive()
+    {
+        return _customMenuArmedAt > InputActivity.LastRightButtonUp &&
+               (DateTime.UtcNow - _customMenuArmedAt).TotalSeconds < 3;
+    }
+
     private void OnLeftClick(uint clickSeq, bool isMenu)
     {
         if (isMenu)
         {
-            OnMenuSelect(clickSeq);
+            if (MenuFlowActive())
+                StartConfirm(clickSeq, "MENUSELECT");
+
+            return;
+        }
+
+        // Custom-drawn menus (Anki etc.): the app read the clipboard right
+        // after the right-click (menu open). The next left click is then the
+        // menu choice - confirm it safely.
+        if (CustomMenuFlowActive())
+        {
+            StartConfirm(clickSeq, "CUSTOMSELECT");
             return;
         }
 
@@ -479,18 +490,15 @@ public sealed class MainForm : Form
         }
     }
 
-    private void OnMenuSelect(uint clickSeq)
+    private void StartConfirm(uint clickSeq, string tag)
     {
-        if (!MenuFlowActive())
-            return;
-
         _menuConfirmSeq = clickSeq;
         _confirmConsumedCount = _consumedCount;
         _confirmStage = 0;
         _menuConfirmTimer?.Stop();
         _menuConfirmTimer?.Start();
 
-        Diag($"MENUSELECT seq={clickSeq}");
+        Diag($"{tag} seq={clickSeq}");
     }
 
     private void OnMenuConfirmTick()
@@ -605,8 +613,14 @@ public sealed class MainForm : Form
             {
                 _backgroundRenderAt = DateTime.UtcNow;
 
-                // Custom-menu apps (Anki): a read right after a left click
-                // means the user actually chose Paste.
+                // A read immediately after a right-click is the signature of a
+                // custom context menu opening (Anki). Remember it.
+                if ((DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalMilliseconds < CustomMenuReadWindowMs)
+                {
+                    _customMenuArmedAt = DateTime.UtcNow;
+                    Diag("CUSTOMMENU read");
+                }
+
                 if (expecting)
                 {
                     _expectUntil = DateTime.MinValue;
@@ -776,7 +790,6 @@ public sealed class MainForm : Form
 
             _lastClipboardSequence = current;
 
-            // A new copy invalidates any pending paste expectation.
             _expectUntil = DateTime.MinValue;
 
             AddClipboardItem(text, html);
