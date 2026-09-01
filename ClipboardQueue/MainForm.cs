@@ -95,7 +95,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.25";
+        Text = "Clipboard Queue 1.26";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -469,14 +469,6 @@ public sealed class MainForm : Form
 
             _renderedItem = item;
 
-            bool isTextRead = format == NativeClipboard.CF_UNICODETEXT;
-            bool freshGesture =
-                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs;
-            bool inCooldown = DateTime.UtcNow < _consumeCooldownUntil;
-
-            Diag($"RENDER fmt={format} text={isTextRead} fresh={freshGesture} cooldown={inCooldown} " +
-                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds}");
-
             if (format == NativeClipboard.CF_UNICODETEXT)
             {
                 NativeClipboard.ProvideData(
@@ -494,7 +486,19 @@ public sealed class MainForm : Form
                 return;
             }
 
-            if (isTextRead && freshGesture && !inCooldown)
+            // A read is a REAL PASTE when the user's last click/keypress happened
+            // AFTER we armed the clipboard (probe reads that follow every copy
+            // always have a gesture OLDER than the arm). Works for text-only
+            // apps (Notepad, fmt 13) and HTML-only apps (Anki, fmt CfHtml).
+            bool pasteRead =
+                InputActivity.LastGesture > _armedAt &&
+                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
+                DateTime.UtcNow >= _consumeCooldownUntil;
+
+            Diag($"RENDER fmt={format} pasteRead={pasteRead} " +
+                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds}");
+
+            if (pasteRead)
             {
                 _renderConsumeTimer?.Stop();
                 _renderConsumeTimer?.Start();
