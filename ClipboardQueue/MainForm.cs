@@ -33,9 +33,14 @@ public sealed class MainForm : Form
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
-    private const double GestureFreshnessMs = 800;
-    private const double ExpectWindowMs = 700;
-    private const double CustomMenuReadWindowMs = 400;
+
+    // A CF_UNICODETEXT read counts as a paste only if a click/keypress
+    // happened within this window before it.
+    private const double GestureFreshnessMs = 2000;
+
+    // After a consumption, ignore further paste-reads for this long so that
+    // one paste (or a held Ctrl+V) cannot consume several items.
+    private const double ConsumeCooldownMs = 500;
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
@@ -59,18 +64,14 @@ public sealed class MainForm : Form
     private System.Windows.Forms.Timer? _clipboardTimer;
     private System.Windows.Forms.Timer? _renderConsumeTimer;
     private System.Windows.Forms.Timer? _syncTimer;
-    private System.Windows.Forms.Timer? _menuConfirmTimer;
     private uint _lastClipboardSequence;
-    private uint _menuConfirmSeq;
-    private int _confirmStage;
 
     private bool _armed;
     private bool _poisoned;
     private DateTime _armedAt = DateTime.MinValue;
     private DateTime _lastArmTime = DateTime.MinValue;
     private DateTime _backgroundRenderAt = DateTime.MinValue;
-    private DateTime _expectUntil = DateTime.MinValue;
-    private DateTime _customMenuArmedAt = DateTime.MinValue;
+    private DateTime _consumeCooldownUntil = DateTime.MinValue;
     private ClipItem? _renderedItem;
 
     private bool _exitRequested;
@@ -81,9 +82,6 @@ public sealed class MainForm : Form
     private bool _suppressCounter = true;
     private int _lastCount = -1;
     private bool _pasteBusy;
-
-    private long _consumedCount;
-    private long _confirmConsumedCount;
 
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
@@ -102,7 +100,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.23";
+        Text = "Clipboard Queue 1.24";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -320,13 +318,6 @@ public sealed class MainForm : Form
             SyncClipboardOwnership();
         };
 
-        _menuConfirmTimer = new System.Windows.Forms.Timer
-        {
-            Interval = 400
-        };
-
-        _menuConfirmTimer.Tick += (_, _) => OnMenuConfirmTick();
-
         try
         {
             _keyboardHook = new KeyboardHook
@@ -349,10 +340,7 @@ public sealed class MainForm : Form
 
         try
         {
-            _mouseHook = new MouseHook
-            {
-                LeftClickAfterRightClick = (seq, isMenu) => PostToUi(() => OnLeftClick(seq, isMenu))
-            };
+            _mouseHook = new MouseHook();
         }
         catch
         {
@@ -422,8 +410,11 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    private static void Diag(string message)
+    private void Diag(string message)
     {
+        if (!_settings.Diagnostics)
+            return;
+
         try
         {
             string dir = Path.Combine(
@@ -452,112 +443,6 @@ public sealed class MainForm : Form
         _syncTimer?.Start();
     }
 
-    private bool MenuFlowActive()
-    {
-        return _backgroundRenderAt > _armedAt &&
-               (DateTime.UtcNow - _backgroundRenderAt).TotalSeconds < 3;
-    }
-
-    private bool CustomMenuFlowActive()
-    {
-        return _customMenuArmedAt > InputActivity.LastRightButtonUp &&
-               (DateTime.UtcNow - _customMenuArmedAt).TotalSeconds < 3;
-    }
-
-    private void OnLeftClick(uint clickSeq, bool isMenu)
-    {
-        if (isMenu)
-        {
-            if (MenuFlowActive())
-                StartConfirm(clickSeq, "MENUSELECT");
-
-            return;
-        }
-
-        // Custom-drawn menus (Anki etc.): the app read the clipboard right
-        // after the right-click (menu open). The next left click is then the
-        // menu choice - confirm it safely.
-        if (CustomMenuFlowActive())
-        {
-            StartConfirm(clickSeq, "CUSTOMSELECT");
-            return;
-        }
-
-        if (MenuFlowActive())
-        {
-            _expectUntil = DateTime.UtcNow.AddMilliseconds(ExpectWindowMs);
-            Diag("EXPECT open");
-        }
-    }
-
-    private void StartConfirm(uint clickSeq, string tag)
-    {
-        _menuConfirmSeq = clickSeq;
-        _confirmConsumedCount = _consumedCount;
-        _confirmStage = 0;
-        _menuConfirmTimer?.Stop();
-        _menuConfirmTimer?.Start();
-
-        Diag($"{tag} seq={clickSeq}");
-    }
-
-    private void OnMenuConfirmTick()
-    {
-        uint seqNow = NativeMethods.GetClipboardSequenceNumber();
-
-        if (seqNow != _menuConfirmSeq)
-        {
-            Diag("CONFIRM cancel: clipboard changed");
-            _menuConfirmTimer?.Stop();
-            return;
-        }
-
-        if (_consumedCount != _confirmConsumedCount)
-        {
-            Diag("CONFIRM cancel: already consumed");
-            _menuConfirmTimer?.Stop();
-            return;
-        }
-
-        if (_confirmStage == 0)
-        {
-            _confirmStage = 1;
-            _menuConfirmTimer?.Stop();
-            _menuConfirmTimer?.Start();
-            Diag("CONFIRM stage1");
-            return;
-        }
-
-        string? headText;
-
-        lock (_sync)
-        {
-            headText = _items.Count > 0 ? _items.Peek().Text : null;
-        }
-
-        string? clipText = null;
-
-        try
-        {
-            if (Clipboard.ContainsText())
-                clipText = Clipboard.GetText();
-        }
-        catch
-        {
-        }
-
-        if (headText == null || clipText == null || clipText != headText)
-        {
-            Diag("CONFIRM cancel: content mismatch");
-            _menuConfirmTimer?.Stop();
-            return;
-        }
-
-        Diag("CONFIRM consume");
-        _menuConfirmTimer?.Stop();
-        ConsumeHead();
-    }
-
     private void HandleRenderFormat(uint format)
     {
         try
@@ -574,19 +459,13 @@ public sealed class MainForm : Form
 
             _renderedItem = item;
 
-            uint seqNow = NativeMethods.GetClipboardSequenceNumber();
+            bool isTextRead = format == NativeClipboard.CF_UNICODETEXT;
+            bool freshGesture =
+                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs;
+            bool inCooldown = DateTime.UtcNow < _consumeCooldownUntil;
 
-            bool userInitiated =
-                InputActivity.LastGesture > _armedAt &&
-                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
-                InputActivity.LastGestureSeq == seqNow;
-
-            bool menuFlow = MenuFlowActive();
-            bool expecting = DateTime.UtcNow < _expectUntil;
-
-            Diag($"RENDER {(userInitiated ? "user" : "bg")} fmt={format} expect={expecting} " +
-                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds} " +
-                 $"gseq={InputActivity.LastGestureSeq} seq={seqNow}");
+            Diag($"RENDER fmt={format} text={isTextRead} fresh={freshGesture} cooldown={inCooldown} " +
+                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds}");
 
             if (format == NativeClipboard.CF_UNICODETEXT)
             {
@@ -600,34 +479,23 @@ public sealed class MainForm : Form
                     format,
                     Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             }
-
-            if (userInitiated)
+            else
             {
-                if (!menuFlow)
-                {
-                    _renderConsumeTimer?.Stop();
-                    _renderConsumeTimer?.Start();
-                }
+                // Unknown format probe: nothing else to do.
+                return;
+            }
+
+            if (isTextRead && freshGesture && !inCooldown)
+            {
+                // An app requested the text right after a user action:
+                // this is a paste (keyboard or any mouse menu).
+                _renderConsumeTimer?.Stop();
+                _renderConsumeTimer?.Start();
             }
             else
             {
+                // Background probe (or repeat/hold): never consume.
                 _backgroundRenderAt = DateTime.UtcNow;
-
-                // A read immediately after a right-click is the signature of a
-                // custom context menu opening (Anki). Remember it.
-                if ((DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalMilliseconds < CustomMenuReadWindowMs)
-                {
-                    _customMenuArmedAt = DateTime.UtcNow;
-                    Diag("CUSTOMMENU read");
-                }
-
-                if (expecting)
-                {
-                    _expectUntil = DateTime.MinValue;
-                    _renderConsumeTimer?.Stop();
-                    _renderConsumeTimer?.Start();
-                    Diag("EXPECT consume scheduled");
-                }
 
                 if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
                 {
@@ -656,37 +524,16 @@ public sealed class MainForm : Form
             return;
 
         _renderedItem = null;
+        _consumeCooldownUntil = DateTime.UtcNow.AddMilliseconds(ConsumeCooldownMs);
 
         lock (_sync)
         {
             if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
             {
                 _items.Dequeue();
-                _consumedCount++;
                 Diag($"CONSUME render count={_items.Count}");
             }
         }
-
-        _backgroundRenderAt = DateTime.MinValue;
-
-        RefreshUi();
-        ScheduleSync();
-    }
-
-    private void ConsumeHead()
-    {
-        lock (_sync)
-        {
-            if (_items.Count > 0)
-            {
-                _items.Dequeue();
-                _consumedCount++;
-                Diag($"CONSUME confirm count={_items.Count}");
-            }
-        }
-
-        _renderedItem = null;
-        _backgroundRenderAt = DateTime.MinValue;
 
         RefreshUi();
         ScheduleSync();
@@ -789,8 +636,6 @@ public sealed class MainForm : Form
             }
 
             _lastClipboardSequence = current;
-
-            _expectUntil = DateTime.MinValue;
 
             AddClipboardItem(text, html);
         }
@@ -1043,7 +888,6 @@ public sealed class MainForm : Form
                     if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
                     {
                         _items.Dequeue();
-                        _consumedCount++;
                         Diag($"CONSUME key count={_items.Count}");
                     }
                 }
@@ -1117,7 +961,6 @@ public sealed class MainForm : Form
                         if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
                         {
                             _items.Dequeue();
-                            _consumedCount++;
                         }
                         else
                         {
@@ -1240,9 +1083,6 @@ public sealed class MainForm : Form
 
             _syncTimer?.Stop();
             _syncTimer?.Dispose();
-
-            _menuConfirmTimer?.Stop();
-            _menuConfirmTimer?.Dispose();
         }
         catch
         {
