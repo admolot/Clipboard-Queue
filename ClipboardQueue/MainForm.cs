@@ -62,9 +62,6 @@ public sealed class MainForm : Form
     private uint _menuConfirmSeq;
     private int _confirmStage;
 
-    private bool _armed;
-    private DateTime _armedAt = DateTime.MinValue;
-
     private bool _exitRequested;
     private bool _cleanedUp;
     private bool _pauseMonitoring;
@@ -94,7 +91,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.27";
+        Text = "Clipboard Queue 1.28";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -344,7 +341,8 @@ public sealed class MainForm : Form
         {
             _mouseHook = new MouseHook
             {
-                LeftClickAfterRightClick = (seq, isMenu) => PostToUi(() => OnLeftClick(seq, isMenu))
+                LeftClickAfterRightClick = (seq, isMenu, firstAfterRight) =>
+                    PostToUi(() => OnLeftClick(seq, isMenu, firstAfterRight))
             };
         }
         catch
@@ -364,13 +362,6 @@ public sealed class MainForm : Form
         if (m.Msg == NativeMethods.WM_CLIPBOARDUPDATE)
         {
             OnClipboardUpdate();
-            base.WndProc(ref m);
-            return;
-        }
-
-        if (m.Msg == NativeClipboard.WM_DESTROYCLIPBOARD)
-        {
-            _armed = false;
             base.WndProc(ref m);
             return;
         }
@@ -445,7 +436,7 @@ public sealed class MainForm : Form
     // Mouse-paste consumption: two-step confirmation.
     // ------------------------------------------------------------------
 
-    private void OnLeftClick(uint clickSeq, bool isMenu)
+    private void OnLeftClick(uint clickSeq, bool isMenu, bool firstAfterRight)
     {
         if (GetCount() == 0)
             return;
@@ -456,9 +447,11 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Custom-drawn menus (Anki etc.): a left click shortly after a right
-        // click is very likely the menu choice.
-        if ((DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds)
+        // Custom-drawn menus (Anki etc.): only the FIRST left click after a
+        // right click can be a menu choice. Later clicks (selecting text etc.)
+        // are ignored, which prevents false consumptions.
+        if (firstAfterRight &&
+            (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds)
         {
             StartConfirm(clickSeq, "CUSTOMSELECT");
         }
@@ -479,7 +472,6 @@ public sealed class MainForm : Form
     {
         uint seqNow = NativeMethods.GetClipboardSequenceNumber();
 
-        // Clipboard changed since the click => user chose Copy/Cut.
         if (seqNow != _menuConfirmSeq)
         {
             Diag("CONFIRM cancel: clipboard changed");
@@ -503,7 +495,6 @@ public sealed class MainForm : Form
             return;
         }
 
-        // Final safety: the clipboard text must still equal the queued item.
         string? headText;
 
         lock (_sync)
@@ -558,7 +549,6 @@ public sealed class MainForm : Form
     {
         if (!_settings.InterceptAllPastes || GetCount() == 0)
         {
-            _armed = false;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
             return;
         }
@@ -577,10 +567,6 @@ public sealed class MainForm : Form
 
         if (NativeClipboard.TrySetHtmlAndText(head.Text, htmlData))
         {
-            _armed = true;
-            _armedAt = DateTime.UtcNow;
-
-            // Do not re-store our own clipboard write as a new item.
             _lastProgrammaticClipboardText = head.Text;
             _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
@@ -634,7 +620,6 @@ public sealed class MainForm : Form
 
             if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList())
             {
-                _armed = false;
                 _lastClipboardSequence = current;
                 return;
             }
@@ -945,7 +930,7 @@ public sealed class MainForm : Form
                 if (_items.Count == 0)
                     return;
 
-                    items = _items.ToArray();
+                items = _items.ToArray();
             }
 
             string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
