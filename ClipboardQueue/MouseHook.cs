@@ -1,7 +1,6 @@
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace ClipboardQueue;
 
@@ -14,8 +13,6 @@ internal sealed class MouseHook : IDisposable
     private const int WM_RBUTTONUP = 0x0205;
     private const int WM_MBUTTONDOWN = 0x0207;
     private const int WM_XBUTTONDOWN = 0x020B;
-
-    private const string MenuWindowClass = "#32768";
 
     private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -37,19 +34,6 @@ internal sealed class MouseHook : IDisposable
         IntPtr wParam,
         IntPtr lParam);
 
-    [DllImport("user32.dll")]
-    private static extern IntPtr WindowFromPoint(POINT pt);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT
-    {
-        public int x;
-        public int y;
-    }
-
     private readonly LowLevelMouseProc _proc;
     private readonly IntPtr _hookId;
     private bool _disposed;
@@ -59,12 +43,10 @@ internal sealed class MouseHook : IDisposable
 
     /// <summary>
     /// Fired when the user left-clicks shortly after a right click.
-    /// Arguments:
-    ///   clipboard sequence at click time,
-    ///   whether the click landed on a real system menu ("#32768"),
-    ///   whether it is the FIRST left click since the right click.
+    /// Arguments: clipboard sequence at click time, and whether it is the
+    /// FIRST left click since the right click.
     /// </summary>
-    public Action<uint, bool, bool>? LeftClickAfterRightClick { get; set; }
+    public Action<uint, bool>? LeftClickAfterRightClick { get; set; }
 
     public MouseHook()
     {
@@ -104,20 +86,10 @@ internal sealed class MouseHook : IDisposable
                         _leftClicksSinceRight++;
                         bool firstAfterRight = _leftClicksSinceRight == 1;
 
-                        bool menuWindow = IsMenuWindowUnderCursor(lParam);
-
-                        if (menuWindow)
-                        {
-                            InputActivity.NoteGesture();
-                        }
-                        else
-                        {
-                            InputActivity.Note();
-                        }
+                        InputActivity.Note();
 
                         LeftClickAfterRightClick?.Invoke(
                             NativeMethods.GetClipboardSequenceNumber(),
-                            menuWindow,
                             firstAfterRight);
                     }
                     else
@@ -137,32 +109,6 @@ internal sealed class MouseHook : IDisposable
         }
 
         return CallNextHookEx(_hookId, nCode, wParam, lParam);
-    }
-
-    private static bool IsMenuWindowUnderCursor(IntPtr lParam)
-    {
-        try
-        {
-            POINT pt;
-            pt.x = Marshal.ReadInt32(lParam, 0);
-            pt.y = Marshal.ReadInt32(lParam, 4);
-
-            IntPtr hwnd = WindowFromPoint(pt);
-
-            if (hwnd == IntPtr.Zero)
-                return false;
-
-            var sb = new StringBuilder(32);
-
-            if (GetClassName(hwnd, sb, sb.Capacity) == 0)
-                return false;
-
-            return sb.ToString() == MenuWindowClass;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     public void Dispose()
