@@ -153,6 +153,12 @@ internal static class NativeMethods
         Thread.Sleep(80);
     }
 
+    /// <summary>
+    /// Simulates Ctrl+V in the foreground app.
+    /// If Ctrl is physically held right now, only V is injected - injecting a
+    /// Ctrl key-up in that case would break the held-modifier state and turn
+    /// auto-repeat presses into plain "v" characters.
+    /// </summary>
     public static void SendCtrlV()
     {
         bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
