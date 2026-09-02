@@ -69,7 +69,6 @@ public sealed class MainForm : Form
     private int _confirmStage;
 
     private bool _armed;
-    private bool _poisoned;
     private bool _realMode;
     private string _lastFgName = string.Empty;
     private DateTime _armedAt = DateTime.MinValue;
@@ -107,7 +106,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.30";
+        Text = "Clipboard Queue 1.31";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -353,9 +352,9 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                ShouldHandleCtrlV = () =>
-                    _settings.OverrideCtrlV && GetCount() > 0 &&
-                    (_realMode || !_armed || _poisoned),
+                // Keyboard paste always goes through the hook: one single,
+                // reliable path (set clipboard -> simulate paste -> consume).
+                ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0,
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
                 CtrlAltVPressed = () => PostToUi(PasteAll)
@@ -635,7 +634,7 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // Delayed-render consumption (Notepad etc.).
+    // Delayed-render consumption: mouse pastes in Win32 apps (Notepad etc.).
     // ------------------------------------------------------------------
 
     private void HandleRenderFormat(uint format)
@@ -697,7 +696,6 @@ public sealed class MainForm : Form
                 }
                 else
                 {
-                    _poisoned = true;
                     _armed = false;
                     Diag("POISON");
                 }
@@ -740,7 +738,6 @@ public sealed class MainForm : Form
 
     private void SyncClipboardOwnership()
     {
-        // Never touch the clipboard right after a programmatic paste.
         if (ClipboardProtected)
             return;
 
@@ -776,7 +773,6 @@ public sealed class MainForm : Form
         if (ok)
         {
             _armed = true;
-            _poisoned = false;
             _armedAt = DateTime.UtcNow;
             _lastArmTime = DateTime.UtcNow;
             _renderedItem = null;
@@ -1241,8 +1237,6 @@ public sealed class MainForm : Form
             if (!clipboardSet)
                 return;
 
-            // Keep everything (including our own maintenance) off the
-            // clipboard until the target app had time to read it.
             ProtectClipboard();
 
             _lastProgrammaticClipboardText = text;
