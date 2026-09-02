@@ -37,6 +37,7 @@ public sealed class MainForm : Form
     private const double GestureFreshnessMs = 2000;
     private const double ConsumeCooldownMs = 500;
     private const double CustomMenuWindowSeconds = 2.0;
+    private const double ClipboardProtectMs = 700;
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
@@ -74,6 +75,7 @@ public sealed class MainForm : Form
     private DateTime _armedAt = DateTime.MinValue;
     private DateTime _lastArmTime = DateTime.MinValue;
     private DateTime _consumeCooldownUntil = DateTime.MinValue;
+    private DateTime _protectClipboardUntil = DateTime.MinValue;
     private ClipItem? _renderedItem;
 
     private bool _exitRequested;
@@ -105,7 +107,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.29";
+        Text = "Clipboard Queue 1.30";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -446,11 +448,6 @@ public sealed class MainForm : Form
         base.OnFormClosing(e);
     }
 
-    // ------------------------------------------------------------------
-    // Foreground tracking: real-data mode for OLE apps (Anki), delayed
-    // rendering for everyone else.
-    // ------------------------------------------------------------------
-
     private void OnFocusPoll()
     {
         string name = GetForegroundProcessName();
@@ -530,9 +527,15 @@ public sealed class MainForm : Form
         _syncTimer?.Start();
     }
 
+    private bool ClipboardProtected => DateTime.UtcNow < _protectClipboardUntil;
+
+    private void ProtectClipboard()
+    {
+        _protectClipboardUntil = DateTime.UtcNow.AddMilliseconds(ClipboardProtectMs);
+    }
+
     // ------------------------------------------------------------------
-    // Mouse-paste consumption for real-mode apps (Anki): confirmation on the
-    // FIRST left click after a right click. Never used in delayed mode.
+    // Mouse-paste consumption for real-mode apps (Anki).
     // ------------------------------------------------------------------
 
     private void OnLeftClick(uint clickSeq, bool firstAfterRight)
@@ -632,8 +635,7 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // Delayed-render consumption (Notepad etc.): consume only when an app
-    // actually reads the text right after a user gesture.
+    // Delayed-render consumption (Notepad etc.).
     // ------------------------------------------------------------------
 
     private void HandleRenderFormat(uint format)
@@ -738,6 +740,10 @@ public sealed class MainForm : Form
 
     private void SyncClipboardOwnership()
     {
+        // Never touch the clipboard right after a programmatic paste.
+        if (ClipboardProtected)
+            return;
+
         if (!_settings.InterceptAllPastes || GetCount() == 0)
         {
             _armed = false;
@@ -1235,6 +1241,10 @@ public sealed class MainForm : Form
             if (!clipboardSet)
                 return;
 
+            // Keep everything (including our own maintenance) off the
+            // clipboard until the target app had time to read it.
+            ProtectClipboard();
+
             _lastProgrammaticClipboardText = text;
             _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
@@ -1248,6 +1258,8 @@ public sealed class MainForm : Form
                 NativeMethods.WaitForModifierKeysRelease();
 
             NativeMethods.SendCtrlV();
+
+            ProtectClipboard();
 
             _renderedItem = null;
             ScheduleSync();
