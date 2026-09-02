@@ -18,6 +18,12 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern uint GetClipboardSequenceNumber();
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
     public const int WH_KEYBOARD_LL = 13;
 
     public const int WM_KEYDOWN = 0x0100;
@@ -142,12 +148,6 @@ internal static class NativeMethods
         Thread.Sleep(80);
     }
 
-    /// <summary>
-    /// Simulates Ctrl+V in the foreground app.
-    /// If Ctrl is physically held right now, only V is injected - injecting a
-    /// Ctrl key-up in that case would break the held-modifier state and turn
-    /// auto-repeat presses into plain "v" characters.
-    /// </summary>
     public static void SendCtrlV()
     {
         bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
