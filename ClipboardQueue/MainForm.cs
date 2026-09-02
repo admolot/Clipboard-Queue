@@ -33,6 +33,9 @@ public sealed class MainForm : Form
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
+    private const int FocusPollMs = 300;
+    private const double GestureFreshnessMs = 2000;
+    private const double ConsumeCooldownMs = 500;
     private const double CustomMenuWindowSeconds = 2.0;
 
     private readonly Queue<ClipItem> _items = new();
@@ -57,10 +60,21 @@ public sealed class MainForm : Form
 
     private System.Windows.Forms.Timer? _clipboardTimer;
     private System.Windows.Forms.Timer? _syncTimer;
+    private System.Windows.Forms.Timer? _focusTimer;
     private System.Windows.Forms.Timer? _menuConfirmTimer;
+    private System.Windows.Forms.Timer? _renderConsumeTimer;
     private uint _lastClipboardSequence;
     private uint _menuConfirmSeq;
     private int _confirmStage;
+
+    private bool _armed;
+    private bool _poisoned;
+    private bool _realMode;
+    private string _lastFgName = string.Empty;
+    private DateTime _armedAt = DateTime.MinValue;
+    private DateTime _lastArmTime = DateTime.MinValue;
+    private DateTime _consumeCooldownUntil = DateTime.MinValue;
+    private ClipItem? _renderedItem;
 
     private bool _exitRequested;
     private bool _cleanedUp;
@@ -91,7 +105,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.28";
+        Text = "Clipboard Queue 1.29";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -311,6 +325,21 @@ public sealed class MainForm : Form
             SyncClipboardOwnership();
         };
 
+        _focusTimer = new System.Windows.Forms.Timer
+        {
+            Interval = FocusPollMs
+        };
+
+        _focusTimer.Tick += (_, _) => OnFocusPoll();
+        _focusTimer.Start();
+
+        _renderConsumeTimer = new System.Windows.Forms.Timer
+        {
+            Interval = 250
+        };
+
+        _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
+
         _menuConfirmTimer = new System.Windows.Forms.Timer
         {
             Interval = 400
@@ -322,7 +351,9 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0,
+                ShouldHandleCtrlV = () =>
+                    _settings.OverrideCtrlV && GetCount() > 0 &&
+                    (_realMode || !_armed || _poisoned),
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
                 CtrlAltVPressed = () => PostToUi(PasteAll)
@@ -341,13 +372,15 @@ public sealed class MainForm : Form
         {
             _mouseHook = new MouseHook
             {
-                LeftClickAfterRightClick = (seq, isMenu, firstAfterRight) =>
-                    PostToUi(() => OnLeftClick(seq, isMenu, firstAfterRight))
+                LeftClickAfterRightClick = (seq, firstAfterRight) =>
+                    PostToUi(() => OnLeftClick(seq, firstAfterRight))
             };
         }
         catch
         {
         }
+
+        OnFocusPoll();
 
         if (_startHidden)
             HideQueueWindow();
@@ -363,6 +396,26 @@ public sealed class MainForm : Form
         {
             OnClipboardUpdate();
             base.WndProc(ref m);
+            return;
+        }
+
+        if (m.Msg == NativeClipboard.WM_DESTROYCLIPBOARD)
+        {
+            _armed = false;
+            base.WndProc(ref m);
+            return;
+        }
+
+        if (m.Msg == NativeClipboard.WM_RENDERFORMAT)
+        {
+            HandleRenderFormat((uint)m.WParam.ToInt64());
+            return;
+        }
+
+        if (m.Msg == NativeClipboard.WM_RENDERALLFORMATS)
+        {
+            HandleRenderFormat(NativeClipboard.CF_UNICODETEXT);
+            HandleRenderFormat(NativeClipboard.CfHtml);
             return;
         }
 
@@ -391,6 +444,51 @@ public sealed class MainForm : Form
 
         Cleanup();
         base.OnFormClosing(e);
+    }
+
+    // ------------------------------------------------------------------
+    // Foreground tracking: real-data mode for OLE apps (Anki), delayed
+    // rendering for everyone else.
+    // ------------------------------------------------------------------
+
+    private void OnFocusPoll()
+    {
+        string name = GetForegroundProcessName();
+
+        if (name == _lastFgName)
+            return;
+
+        _lastFgName = name;
+
+        bool real = _settings.RealDataApps != null &&
+                    _settings.RealDataApps.Any(n =>
+                        string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
+
+        if (real != _realMode || !_armed)
+        {
+            _realMode = real;
+            Diag($"MODE {(real ? "real" : "delayed")} app={name}");
+            SyncClipboardOwnership();
+        }
+    }
+
+    private static string GetForegroundProcessName()
+    {
+        try
+        {
+            IntPtr fg = NativeMethods.GetForegroundWindow();
+
+            if (fg == IntPtr.Zero)
+                return string.Empty;
+
+            NativeMethods.GetWindowThreadProcessId(fg, out uint pid);
+
+            return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     private void SetLogging(bool value)
@@ -433,23 +531,15 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // Mouse-paste consumption: two-step confirmation.
+    // Mouse-paste consumption for real-mode apps (Anki): confirmation on the
+    // FIRST left click after a right click. Never used in delayed mode.
     // ------------------------------------------------------------------
 
-    private void OnLeftClick(uint clickSeq, bool isMenu, bool firstAfterRight)
+    private void OnLeftClick(uint clickSeq, bool firstAfterRight)
     {
-        if (GetCount() == 0)
+        if (GetCount() == 0 || !_realMode)
             return;
 
-        if (isMenu)
-        {
-            StartConfirm(clickSeq, "MENUSELECT");
-            return;
-        }
-
-        // Custom-drawn menus (Anki etc.): only the FIRST left click after a
-        // right click can be a menu choice. Later clicks (selecting text etc.)
-        // are ignored, which prevents false consumptions.
         if (firstAfterRight &&
             (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds)
         {
@@ -542,13 +632,115 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // Clipboard ownership: REAL data (works for Win32 and OLE readers).
+    // Delayed-render consumption (Notepad etc.): consume only when an app
+    // actually reads the text right after a user gesture.
+    // ------------------------------------------------------------------
+
+    private void HandleRenderFormat(uint format)
+    {
+        try
+        {
+            ClipItem? item;
+
+            lock (_sync)
+            {
+                item = _renderedItem ?? (_items.Count > 0 ? _items.Peek() : null);
+            }
+
+            if (item == null)
+                return;
+
+            _renderedItem = item;
+
+            bool knownFormat =
+                format == NativeClipboard.CF_UNICODETEXT ||
+                format == NativeClipboard.CfHtml;
+
+            if (format == NativeClipboard.CF_UNICODETEXT)
+            {
+                NativeClipboard.ProvideData(
+                    format,
+                    Encoding.Unicode.GetBytes(item.Text + "\0"));
+            }
+            else if (format == NativeClipboard.CfHtml)
+            {
+                NativeClipboard.ProvideData(
+                    format,
+                    Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
+            }
+            else
+            {
+                return;
+            }
+
+            bool pasteRead =
+                knownFormat &&
+                InputActivity.LastGesture > _armedAt &&
+                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
+                DateTime.UtcNow >= _consumeCooldownUntil;
+
+            Diag($"RENDER fmt={format} pasteRead={pasteRead} " +
+                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds}");
+
+            if (pasteRead)
+            {
+                _renderConsumeTimer?.Stop();
+                _renderConsumeTimer?.Start();
+            }
+            else
+            {
+                if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
+                {
+                    PostToUi(ScheduleSync);
+                }
+                else
+                {
+                    _poisoned = true;
+                    _armed = false;
+                    Diag("POISON");
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void ConsumeRenderedItem()
+    {
+        _renderConsumeTimer?.Stop();
+
+        ClipItem? rendered = _renderedItem;
+
+        if (rendered == null)
+            return;
+
+        _renderedItem = null;
+        _consumeCooldownUntil = DateTime.UtcNow.AddMilliseconds(ConsumeCooldownMs);
+
+        lock (_sync)
+        {
+            if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
+            {
+                _items.Dequeue();
+                _consumedCount++;
+                Diag($"CONSUME render count={_items.Count}");
+            }
+        }
+
+        RefreshUi();
+        ScheduleSync();
+    }
+
+    // ------------------------------------------------------------------
+    // Clipboard ownership.
     // ------------------------------------------------------------------
 
     private void SyncClipboardOwnership()
     {
         if (!_settings.InterceptAllPastes || GetCount() == 0)
         {
+            _armed = false;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
             return;
         }
@@ -563,15 +755,31 @@ public sealed class MainForm : Form
         if (head == null)
             return;
 
-        string htmlData = HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head));
+        bool ok;
 
-        if (NativeClipboard.TrySetHtmlAndText(head.Text, htmlData))
+        if (_realMode)
         {
+            string htmlData = HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head));
+            ok = NativeClipboard.TrySetHtmlAndText(head.Text, htmlData);
+        }
+        else
+        {
+            ok = NativeClipboard.ArmDelayed(Handle);
+        }
+
+        if (ok)
+        {
+            _armed = true;
+            _poisoned = false;
+            _armedAt = DateTime.UtcNow;
+            _lastArmTime = DateTime.UtcNow;
+            _renderedItem = null;
+
             _lastProgrammaticClipboardText = head.Text;
             _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
-            Diag("ARM real");
+            Diag($"ARM {(_realMode ? "real" : "delayed")}");
         }
     }
 
@@ -620,6 +828,7 @@ public sealed class MainForm : Form
 
             if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList())
             {
+                _armed = false;
                 _lastClipboardSequence = current;
                 return;
             }
@@ -1040,6 +1249,7 @@ public sealed class MainForm : Form
 
             NativeMethods.SendCtrlV();
 
+            _renderedItem = null;
             ScheduleSync();
         }
         catch
@@ -1095,6 +1305,12 @@ public sealed class MainForm : Form
 
             _syncTimer?.Stop();
             _syncTimer?.Dispose();
+
+            _focusTimer?.Stop();
+            _focusTimer?.Dispose();
+
+            _renderConsumeTimer?.Stop();
+            _renderConsumeTimer?.Dispose();
 
             _menuConfirmTimer?.Stop();
             _menuConfirmTimer?.Dispose();
