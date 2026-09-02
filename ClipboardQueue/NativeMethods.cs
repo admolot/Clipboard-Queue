@@ -124,7 +124,12 @@ internal static class NativeMethods
         public ushort wParamH;
     }
 
-    public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 1500)
+    /// <summary>
+    /// Waits until all modifier keys AND mouse buttons are released, so the
+    /// simulated Ctrl+V is not swallowed and the target app is not in a
+    /// drag/selection state anymore.
+    /// </summary>
+    public static void WaitForModifierKeysRelease(int timeoutMilliseconds = 2500)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
 
