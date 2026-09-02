@@ -81,20 +81,19 @@ internal sealed class MouseHook : IDisposable
                 }
                 else if (msg == WM_LBUTTONDOWN)
                 {
+                    // Every left click is a potential paste gesture (mouse
+                    // paste in Notepad etc. is detected via the clipboard read
+                    // that follows such a click).
+                    InputActivity.NoteGesture();
+
                     if ((DateTime.UtcNow - _lastRightButtonUp).TotalSeconds < 10)
                     {
                         _leftClicksSinceRight++;
                         bool firstAfterRight = _leftClicksSinceRight == 1;
 
-                        InputActivity.Note();
-
                         LeftClickAfterRightClick?.Invoke(
                             NativeMethods.GetClipboardSequenceNumber(),
                             firstAfterRight);
-                    }
-                    else
-                    {
-                        InputActivity.Note();
                     }
                 }
                 else if (msg == WM_MBUTTONDOWN || msg == WM_XBUTTONDOWN)
