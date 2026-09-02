@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
@@ -8,18 +9,18 @@ public sealed class AppSettings
 {
     public string PasteAllSeparator { get; set; } = Environment.NewLine + Environment.NewLine;
 
-    // If true, Ctrl+V pastes the oldest queued item whenever the queue is not empty.
     public bool OverrideCtrlV { get; set; } = true;
 
-    // If true, plain-text copies (no HTML) are rendered as Markdown.
     public bool RenderMarkdownForPlainText { get; set; } = false;
 
-    // If true, the app owns the clipboard while the queue is not empty,
-    // so any paste method (keyboard, right-click menu) pastes the oldest item.
     public bool InterceptAllPastes { get; set; } = true;
 
-    // If true, diagnostics.log is written.
     public bool Diagnostics { get; set; } = true;
+
+    // Apps that read the clipboard via OLE (no delayed-render signals).
+    // While such an app is in the foreground the clipboard holds REAL data,
+    // and mouse-paste consumption uses the click confirmation.
+    public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
 }
 
 public static class SettingsManager
@@ -29,7 +30,6 @@ public static class SettingsManager
         WriteIndented = true
     };
 
-    // Portable: everything is stored next to the executable.
     private static string SettingsPath =>
         Path.Combine(AppContext.BaseDirectory, "settings.json");
 
