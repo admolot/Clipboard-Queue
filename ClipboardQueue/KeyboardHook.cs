@@ -6,12 +6,15 @@ namespace ClipboardQueue;
 
 internal sealed class KeyboardHook : IDisposable
 {
+    private const double RepeatWindowMs = 600;
+
     private readonly NativeMethods.LowLevelKeyboardProc _hookProc;
     private readonly IntPtr _hookId;
 
     private bool _ctrlVHandled;
     private bool _ctrlAltVHandled;
     private bool _vKeyActive;
+    private DateTime _lastCtrlVKeyDown = DateTime.MinValue;
     private bool _disposed;
 
     public Func<bool>? ShouldHandleCtrlV { get; set; }
@@ -52,69 +55,63 @@ internal sealed class KeyboardHook : IDisposable
                 {
                     bool ctrlDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
 
-                    // Ctrl+V first press = a paste gesture; auto-repeats are
-                    // passed through untouched so the target app repeats the
-                    // current clipboard natively (held Ctrl+V = "111111...").
                     if (vkCode == NativeMethods.VK_V && ctrlDown && !keyUp)
                     {
-                        bool isRepeat = _vKeyActive;
+                        // Self-healing repeat detection: a press is a repeat
+                        // only if it closely follows the previous V press.
+                        bool isRepeat = _vKeyActive &&
+                                        (DateTime.UtcNow - _lastCtrlVKeyDown).TotalMilliseconds < RepeatWindowMs;
+
                         _vKeyActive = true;
+                        _lastCtrlVKeyDown = DateTime.UtcNow;
 
-                        if (isRepeat)
+                        bool altDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
+                        bool leftMouseDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
+
+                        // Bulk-paste combos are ALWAYS handled, even if the
+                        // repeat flag was stuck for some reason.
+                        if (altDown || leftMouseDown)
                         {
-                            InputActivity.Note();
-                            return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
-                        }
+                            if (ShouldHandleCtrlAltV?.Invoke() == true)
+                            {
+                                if (!_ctrlAltVHandled)
+                                {
+                                    _ctrlAltVHandled = true;
+                                    CtrlAltVPressed?.Invoke();
+                                }
 
-                        InputActivity.NoteGesture();
+                                return (IntPtr)1;
+                            }
+                        }
+                        else
+                        {
+                            // Held Ctrl+V: auto-repeats pass through untouched
+                            // so the target repeats the current clipboard
+                            // natively ("111111...").
+                            if (isRepeat)
+                            {
+                                InputActivity.Note();
+                                return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
+                            }
+
+                            if (ShouldHandleCtrlV?.Invoke() == true)
+                            {
+                                if (!_ctrlVHandled)
+                                {
+                                    _ctrlVHandled = true;
+                                    CtrlVPressed?.Invoke();
+                                }
+
+                                return (IntPtr)1;
+                            }
+
+                            InputActivity.NoteGesture();
+                        }
                     }
                     else if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
                              wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
                     {
                         InputActivity.Note();
-                    }
-
-                    if (vkCode == NativeMethods.VK_V)
-                    {
-                        bool altDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
-                        bool leftMouseDown = (NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0;
-
-                        if (ctrlDown)
-                        {
-                            if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN ||
-                                wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
-                            {
-                                // Ctrl+Alt+V -> paste all
-                                // Ctrl+V while holding LEFT mouse button -> paste all
-                                // Ctrl+V -> paste next
-                                if (altDown || leftMouseDown)
-                                {
-                                    if (ShouldHandleCtrlAltV?.Invoke() == true)
-                                    {
-                                        if (!_ctrlAltVHandled)
-                                        {
-                                            _ctrlAltVHandled = true;
-                                            CtrlAltVPressed?.Invoke();
-                                        }
-
-                                        return (IntPtr)1;
-                                    }
-                                }
-                                else
-                                {
-                                    if (ShouldHandleCtrlV?.Invoke() == true)
-                                    {
-                                        if (!_ctrlVHandled)
-                                        {
-                                            _ctrlVHandled = true;
-                                            CtrlVPressed?.Invoke();
-                                        }
-
-                                        return (IntPtr)1;
-                                    }
-                                }
-                            }
-                        }
                     }
 
                     if (keyUp &&
