@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -106,7 +107,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.31";
+        Text = "Clipboard Queue 1.33";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -352,8 +353,6 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                // Keyboard paste always goes through the hook: one single,
-                // reliable path (set clipboard -> simulate paste -> consume).
                 ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0,
                 ShouldHandleCtrlAltV = () => GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
@@ -785,13 +784,43 @@ public sealed class MainForm : Form
         }
     }
 
+    // ------------------------------------------------------------------
+    // HTML preparation: keep inline formatting, but turn the block structure
+    // into explicit line breaks so blank lines survive in editors like Anki.
+    // ------------------------------------------------------------------
+
+    private static string PrepareRichHtml(string html)
+    {
+        // Empty block elements (the usual representation of a blank line)
+        // become a single line break.
+        string result = Regex.Replace(
+            html,
+            @"<(div|p|h[1-6]|li)[^>]*>\s*(?:<br\s*/?>)?\s*</\1>",
+            "<br>",
+            RegexOptions.IgnoreCase);
+
+        // A boundary between two blocks becomes a blank line
+        // (two line breaks), which is what the visual gap means.
+        result = Regex.Replace(
+            result,
+            @"</(div|p|h[1-6]|li)>\s*<(div|p|h[1-6]|li)[^>]*>",
+            "<br><br>",
+            RegexOptions.IgnoreCase);
+
+        // Drop a single outer wrapper pair if present.
+        result = Regex.Replace(result, @"^\s*<(div|p)[^>]*>", "", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"</(div|p)>\s*$", "", RegexOptions.IgnoreCase);
+
+        return result;
+    }
+
     private string BuildHtmlData(ClipItem item)
     {
         string html;
 
         if (!string.IsNullOrWhiteSpace(item.Html))
         {
-            html = item.Html;
+            html = PrepareRichHtml(item.Html);
         }
         else if (_settings.RenderMarkdownForPlainText)
         {
@@ -1148,8 +1177,6 @@ public sealed class MainForm : Form
                 ? Environment.NewLine + Environment.NewLine
                 : _settings.PasteAllSeparator;
 
-            bool renderMarkdown = _settings.RenderMarkdownForPlainText;
-
             var combined = await Task.Run(() =>
             {
                 var textBuilder = new StringBuilder();
@@ -1160,18 +1187,12 @@ public sealed class MainForm : Form
                     ClipItem item = items[i];
 
                     textBuilder.Append(item.Text);
-
-                    htmlBuilder.Append(
-                        string.IsNullOrWhiteSpace(item.Html)
-                            ? (renderMarkdown
-                                ? Markdown.ToHtml(item.Text, MarkdownPipeline)
-                                : HtmlClipboardHelper.PlainTextToHtml(item.Text))
-                            : item.Html);
+                    htmlBuilder.Append(BuildHtmlData(item));
 
                     if (i < items.Length - 1)
                     {
                         textBuilder.Append(separator);
-                        htmlBuilder.Append("<p><br></p>");
+                        htmlBuilder.Append("<br><br>");
                     }
                 }
 
@@ -1209,17 +1230,21 @@ public sealed class MainForm : Form
     {
         try
         {
-            string htmlToUse = html ?? string.Empty;
+            string htmlToUse;
 
-            if (string.IsNullOrWhiteSpace(htmlToUse))
+            if (!string.IsNullOrWhiteSpace(html))
             {
-                bool renderMarkdown = _settings.RenderMarkdownForPlainText;
+                htmlToUse = PrepareRichHtml(html);
+            }
+            else if (_settings.RenderMarkdownForPlainText)
+            {
                 string textCopy = text;
-
-                htmlToUse = await Task.Run(() =>
-                    renderMarkdown
-                        ? Markdown.ToHtml(textCopy, MarkdownPipeline)
-                        : HtmlClipboardHelper.PlainTextToHtml(textCopy));
+                htmlToUse = await Task.Run(() => Markdown.ToHtml(textCopy, MarkdownPipeline));
+            }
+            else
+            {
+                string textCopy = text;
+                htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(textCopy));
             }
 
             string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
