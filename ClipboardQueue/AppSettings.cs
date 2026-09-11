@@ -23,9 +23,15 @@ public sealed class AppSettings
     public bool Diagnostics { get; set; } = true;
 
     // Apps that read the clipboard via OLE (no delayed-render signals).
-    // While such an app is in the foreground the clipboard holds REAL data,
-    // and mouse-paste consumption uses the click confirmation.
     public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
+
+    // If true, hyperlinks are removed on paste (inner text is kept).
+    // If false, hyperlinks are kept as clickable links.
+    public bool StripHyperlinks { get; set; } = true;
+
+    // If true, bullet/list markers are removed on paste (items become plain lines).
+    // If false, bullet lists are kept as they are.
+    public bool StripBulletPoints { get; set; } = false;
 }
 
 public static class SettingsManager
