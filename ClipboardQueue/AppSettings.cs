@@ -26,12 +26,14 @@ public sealed class AppSettings
     public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
 
     // If true, hyperlinks are removed on paste (inner text is kept).
-    // If false, hyperlinks are kept as clickable links.
     public bool StripHyperlinks { get; set; } = true;
 
     // If true, bullet/list markers are removed on paste (items become plain lines).
-    // If false, bullet lists are kept as they are.
     public bool StripBulletPoints { get; set; } = false;
+
+    // Words/phrases to remove (one per line). Trailing spaces after an entry
+    // are removed together with it.
+    public List<string> FilterWords { get; set; } = new List<string>();
 }
 
 public static class SettingsManager
