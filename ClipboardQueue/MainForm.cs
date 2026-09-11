@@ -107,7 +107,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.33";
+        Text = "Clipboard Queue 1.34";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -785,16 +785,49 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // HTML preparation: keep inline formatting, but turn the block structure
-    // into explicit line breaks so blank lines survive in editors like Anki.
+    // HTML preparation:
+    //  - hyperlinks and italics are removed (inner text is kept),
+    //  - block structure is turned into explicit line breaks so blank lines
+    //    survive in editors like Anki,
+    //  - bold and other inline formatting stay.
     // ------------------------------------------------------------------
 
     private static string PrepareRichHtml(string html)
     {
+        string result = html;
+
+        // Unwrap links and italic tags, keeping only their text.
+        // Several passes handle nested tags.
+        for (int pass = 0; pass < 6; pass++)
+        {
+            string before = result;
+
+            result = Regex.Replace(
+                result,
+                @"<a\b[^>]*>(.*?)</a>",
+                "$1",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+            result = Regex.Replace(
+                result,
+                @"<(em|i)\b[^>]*>(.*?)</\1>",
+                "$2",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+            result = Regex.Replace(
+                result,
+                @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>",
+                "$1",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+            if (result == before)
+                break;
+        }
+
         // Empty block elements (the usual representation of a blank line)
         // become a single line break.
-        string result = Regex.Replace(
-            html,
+        result = Regex.Replace(
+            result,
             @"<(div|p|h[1-6]|li)[^>]*>\s*(?:<br\s*/?>)?\s*</\1>",
             "<br>",
             RegexOptions.IgnoreCase);
