@@ -109,7 +109,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.49";
+        Text = "Clipboard Queue 1.50";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -499,8 +499,7 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // HTML preparation: unwrap links, drop italics, optional bullet strip,
-    // and normalize block structure into explicit line/blank-line breaks.
+    // HTML preparation.
     // ------------------------------------------------------------------
 
     private string CleanText(string text)
@@ -536,21 +535,21 @@ public sealed class MainForm : Form
         if (_settings.StripBulletPoints)
         {
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"</li>", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"<li\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"<li\b[^>]*>", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"</li>", "<br>", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"(\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
         }
 
-        // Empty block elements -> single line break.
-        result = Regex.Replace(result, @"<(div|p|h[1-6]|li)[^>]*>\s*(?:<br\s*/?>)?\s*</\1>", "<br>", RegexOptions.IgnoreCase);
-        // Block boundary -> blank line.
-        result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>\s*<(div|p|h[1-6]|li)[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
-        // Drop a single outer wrapper pair if present.
-        result = Regex.Replace(result, @"^\s*<(div|p)[^>]*>", "", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"</(div|p)>\s*$", "", RegexOptions.IgnoreCase);
+        // Ensure empty block elements have a <br> inside so editors like Anki
+        // don't collapse them (which would lose explicit blank lines).
+        // We no longer strip block tags or inject <br><br> between them,
+        // because that created artificially huge gaps.
+        for (int p = 0; p < 6; p++)
+        {
+            string b = result;
+            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)(\b[^>]*)>\s*</\1>", "<$1$2><br></$1>", RegexOptions.IgnoreCase);
+            if (b == result) break;
+        }
 
         return result;
     }
