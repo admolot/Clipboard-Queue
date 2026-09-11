@@ -51,6 +51,8 @@ public sealed class MainForm : Form
     private readonly CheckBox _pauseCheckBox;
     private readonly CheckBox _startupCheckBox;
     private readonly CheckBox _loggingCheckBox;
+    private readonly CheckBox _stripLinksCheckBox;
+    private readonly CheckBox _stripBulletsCheckBox;
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _pauseMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
@@ -107,7 +109,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.34";
+        Text = "Clipboard Queue 1.36";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -201,6 +203,22 @@ public sealed class MainForm : Form
         };
         _loggingCheckBox.CheckedChanged += (_, _) => SetLogging(_loggingCheckBox.Checked);
 
+        _stripLinksCheckBox = new CheckBox
+        {
+            Text = "Strip hyperlinks",
+            AutoSize = true,
+            Checked = _settings.StripHyperlinks
+        };
+        _stripLinksCheckBox.CheckedChanged += (_, _) => SetStripHyperlinks(_stripLinksCheckBox.Checked);
+
+        _stripBulletsCheckBox = new CheckBox
+        {
+            Text = "Strip bullet points",
+            AutoSize = true,
+            Checked = _settings.StripBulletPoints
+        };
+        _stripBulletsCheckBox.CheckedChanged += (_, _) => SetStripBulletPoints(_stripBulletsCheckBox.Checked);
+
         _countLabel = new Label
         {
             AutoSize = true,
@@ -216,6 +234,8 @@ public sealed class MainForm : Form
         buttonPanel.Controls.Add(_pauseCheckBox);
         buttonPanel.Controls.Add(_startupCheckBox);
         buttonPanel.Controls.Add(_loggingCheckBox);
+        buttonPanel.Controls.Add(_stripLinksCheckBox);
+        buttonPanel.Controls.Add(_stripBulletsCheckBox);
         buttonPanel.Controls.Add(_countLabel);
 
         root.Controls.Add(_listView, 0, 0);
@@ -496,6 +516,24 @@ public sealed class MainForm : Form
 
         if (value)
             Diag("LOGGING ON");
+    }
+
+    private void SetStripHyperlinks(bool value)
+    {
+        if (_settings.StripHyperlinks == value)
+            return;
+
+        _settings.StripHyperlinks = value;
+        SettingsManager.Save(_settings);
+    }
+
+    private void SetStripBulletPoints(bool value)
+    {
+        if (_settings.StripBulletPoints == value)
+            return;
+
+        _settings.StripBulletPoints = value;
+        SettingsManager.Save(_settings);
     }
 
     private void Diag(string message)
@@ -785,28 +823,47 @@ public sealed class MainForm : Form
     }
 
     // ------------------------------------------------------------------
-    // HTML preparation:
-    //  - hyperlinks and italics are removed (inner text is kept),
-    //  - block structure is turned into explicit line breaks so blank lines
-    //    survive in editors like Anki,
-    //  - bold and other inline formatting stay.
+    // Text / HTML preparation with user-configurable cleanup.
     // ------------------------------------------------------------------
 
-    private static string PrepareRichHtml(string html)
+    private string CleanText(string text)
+    {
+        if (!_settings.StripBulletPoints)
+            return text;
+
+        // Remove leading bullet markers from each line.
+        return Regex.Replace(
+            text,
+            @"(?m)^[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
+            "");
+    }
+
+    private string PrepareRichHtml(string html)
     {
         string result = html;
 
-        // Unwrap links and italic tags, keeping only their text.
-        // Several passes handle nested tags.
+        // Optional: unwrap hyperlinks, keeping only their text.
+        if (_settings.StripHyperlinks)
+        {
+            for (int pass = 0; pass < 6; pass++)
+            {
+                string before = result;
+
+                result = Regex.Replace(
+                    result,
+                    @"<a\b[^>]*>(.*?)</a>",
+                    "$1",
+                    RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+                if (result == before)
+                    break;
+            }
+        }
+
+        // Italics are always removed (inner text kept).
         for (int pass = 0; pass < 6; pass++)
         {
             string before = result;
-
-            result = Regex.Replace(
-                result,
-                @"<a\b[^>]*>(.*?)</a>",
-                "$1",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
             result = Regex.Replace(
                 result,
@@ -822,6 +879,18 @@ public sealed class MainForm : Form
 
             if (result == before)
                 break;
+        }
+
+        // Optional: remove list wrappers and bullet glyphs.
+        if (_settings.StripBulletPoints)
+        {
+            result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
+
+            result = Regex.Replace(
+                result,
+                @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
+                "",
+                RegexOptions.IgnoreCase);
         }
 
         // Empty block elements (the usual representation of a blank line)
@@ -935,6 +1004,8 @@ public sealed class MainForm : Form
     {
         if (_pauseMonitoring)
             return;
+
+        text = CleanText(text);
 
         if (string.IsNullOrWhiteSpace(text))
             return;
