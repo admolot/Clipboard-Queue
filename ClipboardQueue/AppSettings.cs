@@ -25,10 +25,12 @@ public sealed class AppSettings
     // Apps that read the clipboard via OLE (no delayed-render signals).
     public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
 
-    // If true, hyperlinks are unwrapped to plain text on paste.
+    // If true, hyperlinks are removed on paste (inner text is kept).
+    // If false, hyperlinks are kept as clickable links.
     public bool StripHyperlinks { get; set; } = true;
 
-    // If true, bullet/list markers are removed on paste.
+    // If true, bullet/list markers are removed on paste (items become plain lines).
+    // If false, bullet lists are kept as they are.
     public bool StripBulletPoints { get; set; } = false;
 }
 
@@ -39,6 +41,7 @@ public static class SettingsManager
         WriteIndented = true
     };
 
+    // Portable: everything is stored next to the executable.
     private static string SettingsPath =>
         Path.Combine(AppContext.BaseDirectory, "settings.json");
 
