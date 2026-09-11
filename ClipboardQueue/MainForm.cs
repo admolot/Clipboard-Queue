@@ -152,7 +152,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.45";
+        Text = "Clipboard Queue 1.46";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -361,13 +361,16 @@ public sealed class MainForm : Form
             : Regex.Replace(text, _filterPattern, string.Empty);
     }
 
-    // Safe HTML filter: splits into tags / text tokens and only removes
-    //  (a) filter words inside a text token (plus their own trailing spaces), and
-    //  (b) a tag pair whose WHOLE text content is a filter word (plus one space after it).
-    // No other whitespace is ever touched, so normal word spacing survives.
+    // Safe HTML filter (tokenizer). Only removes:
+    //  (a) filter words inside a text token (+ their own trailing spaces), and
+    //  (b) a tag pair whose WHOLE text is a filter word (+ at most one space after it).
+    // All other whitespace is preserved.
     private string ApplyFilterHtml(string html)
     {
         if (!_settings.EnableFilter || _filterPattern == null)
+            return html;
+
+        if (string.IsNullOrEmpty(html))
             return html;
 
         var entries = (_settings.FilterWords ?? new List<string>())
@@ -386,17 +389,18 @@ public sealed class MainForm : Form
         var tokens = Regex.Split(html, @"(<[^>]*>)");
         int n = tokens.Length;
 
-        var orig = new string[n];
-        var text = new string[n];
+        var work = new string[n];       // mutable raw text for text tokens
+        var filtered = new string[n];   // final text for text tokens
         var isTag = new bool[n];
         var removed = new bool[n];
+        var trimLeading = new bool[n];
         var stack = new Stack<int>();
 
         for (int i = 0; i < n; i++)
         {
             string t = tokens[i];
 
-            if (t.Length == 0)
+            if (string.IsNullOrEmpty(t))
             {
                 removed[i] = true;
                 continue;
@@ -423,7 +427,9 @@ public sealed class MainForm : Form
                         for (int k = open + 1; k < i; k++)
                         {
                             if (isTag[k]) { pure = false; break; }
-                            sb.Append(orig[k]);
+                            if (removed[k]) continue;
+                            if (work[k] == null) { pure = false; break; }
+                            sb.Append(work[k]);
                         }
 
                         if (pure && fullRe.IsMatch(sb.ToString()))
@@ -432,13 +438,14 @@ public sealed class MainForm : Form
                             removed[i] = true;
                             for (int k = open + 1; k < i; k++) removed[k] = true;
 
-                            // Eat at most one space that directly follows the removed pair.
+                            // Mark (do NOT read yet) the next text token so that
+                            // one leading space is trimmed when it is processed.
                             for (int k = i + 1; k < n; k++)
                             {
-                                if (tokens[k].Length == 0) continue;
-                                if (tokens[k][0] == '<') continue;
-                                if (text[k].StartsWith(" ")) text[k] = text[k].Substring(1);
-                                else if (text[k].StartsWith("\t")) text[k] = text[k].Substring(1);
+                                string nt = tokens[k];
+                                if (string.IsNullOrEmpty(nt)) continue;
+                                if (nt[0] == '<') continue;
+                                trimLeading[k] = true;
                                 break;
                             }
                         }
@@ -447,19 +454,27 @@ public sealed class MainForm : Form
             }
             else
             {
-                orig[i] = t;
-                text[i] = wordRe.Replace(t, "");
+                string w = t;
+                if (trimLeading[i] && (w[0] == ' ' || w[0] == '\t'))
+                    w = w.Substring(1);
+                work[i] = w;
             }
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            if (!isTag[i] && !removed[i] && work[i] != null)
+                filtered[i] = wordRe.Replace(work[i], "");
         }
 
         var result = new StringBuilder();
         for (int i = 0; i < n; i++)
         {
             if (removed[i]) continue;
-            result.Append(isTag[i] ? tokens[i] : text[i]);
+            if (isTag[i]) result.Append(tokens[i]);
+            else if (filtered[i] != null) result.Append(filtered[i]);
         }
 
-        // Finally drop any tag pairs that became empty (no space touching).
         string s = result.ToString();
         for (int pass = 0; pass < 6; pass++)
         {
