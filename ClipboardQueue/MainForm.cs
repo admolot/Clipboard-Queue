@@ -152,7 +152,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.44";
+        Text = "Clipboard Queue 1.45";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -361,6 +361,10 @@ public sealed class MainForm : Form
             : Regex.Replace(text, _filterPattern, string.Empty);
     }
 
+    // Safe HTML filter: splits into tags / text tokens and only removes
+    //  (a) filter words inside a text token (plus their own trailing spaces), and
+    //  (b) a tag pair whose WHOLE text content is a filter word (plus one space after it).
+    // No other whitespace is ever touched, so normal word spacing survives.
     private string ApplyFilterHtml(string html)
     {
         if (!_settings.EnableFilter || _filterPattern == null)
@@ -372,39 +376,99 @@ public sealed class MainForm : Form
             .Select(Regex.Escape)
             .ToList();
 
-        if (entries.Count == 0) return html;
+        if (entries.Count == 0)
+            return html;
 
         string inner = string.Join("|", entries);
-        string result = html;
+        var wordRe = new Regex(@"(?:" + inner + @")[ \t]*", RegexOptions.IgnoreCase);
+        var fullRe = new Regex(@"^\s*(?:" + inner + @")\s*$", RegexOptions.IgnoreCase);
 
-        // 1. Remove tag pairs containing ONLY the filter word (and optional whitespace).
-        //    NOTE: we deliberately do NOT eat the space after the closing tag,
-        //    because sources insert empty spacer tags between words and eating
-        //    the following space would glue words together.
-        string tagPattern = @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*(?:" + inner + @")\s*</\1>";
-        bool changed = true;
-        while (changed)
+        var tokens = Regex.Split(html, @"(<[^>]*>)");
+        int n = tokens.Length;
+
+        var orig = new string[n];
+        var text = new string[n];
+        var isTag = new bool[n];
+        var removed = new bool[n];
+        var stack = new Stack<int>();
+
+        for (int i = 0; i < n; i++)
         {
-            string before = result;
-            result = Regex.Replace(result, tagPattern, string.Empty, RegexOptions.IgnoreCase);
-            changed = result != before;
+            string t = tokens[i];
+
+            if (t.Length == 0)
+            {
+                removed[i] = true;
+                continue;
+            }
+
+            if (t[0] == '<')
+            {
+                isTag[i] = true;
+                bool isClose = t.Length > 1 && t[1] == '/';
+                bool selfClose = t.EndsWith("/>");
+
+                if (!isClose && !selfClose)
+                {
+                    stack.Push(i);
+                }
+                else if (isClose)
+                {
+                    if (stack.Count > 0)
+                    {
+                        int open = stack.Pop();
+
+                        var sb = new StringBuilder();
+                        bool pure = true;
+                        for (int k = open + 1; k < i; k++)
+                        {
+                            if (isTag[k]) { pure = false; break; }
+                            sb.Append(orig[k]);
+                        }
+
+                        if (pure && fullRe.IsMatch(sb.ToString()))
+                        {
+                            removed[open] = true;
+                            removed[i] = true;
+                            for (int k = open + 1; k < i; k++) removed[k] = true;
+
+                            // Eat at most one space that directly follows the removed pair.
+                            for (int k = i + 1; k < n; k++)
+                            {
+                                if (tokens[k].Length == 0) continue;
+                                if (tokens[k][0] == '<') continue;
+                                if (text[k].StartsWith(" ")) text[k] = text[k].Substring(1);
+                                else if (text[k].StartsWith("\t")) text[k] = text[k].Substring(1);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                orig[i] = t;
+                text[i] = wordRe.Replace(t, "");
+            }
         }
 
-        // 2. Remove plain text occurrences (outside of tags) + their trailing spaces.
-        string plainPattern = @"(?:" + inner + @")[ \t]*";
-        result = Regex.Replace(result, @"<[^>]*>|" + plainPattern, m => m.Value.StartsWith("<") ? m.Value : string.Empty, RegexOptions.IgnoreCase);
-
-        // 3. Remove empty tags left over (again, WITHOUT eating following spaces).
-        string emptyTagPattern = @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*</\1>";
-        changed = true;
-        while (changed)
+        var result = new StringBuilder();
+        for (int i = 0; i < n; i++)
         {
-            string before = result;
-            result = Regex.Replace(result, emptyTagPattern, string.Empty, RegexOptions.IgnoreCase);
-            changed = result != before;
+            if (removed[i]) continue;
+            result.Append(isTag[i] ? tokens[i] : text[i]);
         }
 
-        return result;
+        // Finally drop any tag pairs that became empty (no space touching).
+        string s = result.ToString();
+        for (int pass = 0; pass < 6; pass++)
+        {
+            string before = s;
+            s = Regex.Replace(s, @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*</\1>", "", RegexOptions.IgnoreCase);
+            if (before == s) break;
+        }
+
+        return s;
     }
 
     private void OnFocusPoll()
