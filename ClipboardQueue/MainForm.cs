@@ -118,7 +118,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.47";
+        Text = "Clipboard Queue 1.48";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -354,19 +354,12 @@ public sealed class MainForm : Form
         return ApplyFilter(text);
     }
 
+    // Legacy rich-HTML cleanup (used only when Preserve spacing is OFF).
     private string PrepareRichHtml(string html)
     {
         string result = html;
-
-        // Hyperlink unwrap never affects spacing, keep it always (if enabled).
         if (_settings.StripHyperlinks)
             for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<a\b[^>]*>(.*?)</a>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
-
-        // PRESERVE SPACING: skip every structural rewrite; only filter words.
-        if (_settings.PreserveSourceSpacing)
-            return ApplyFilterHtml(result);
-
-        // Legacy cleanup path (italics / bullets / blank-line normalization).
         for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<(em|i)\b[^>]*>(.*?)</\1>", "$2", RegexOptions.IgnoreCase | RegexOptions.Singleline); result = Regex.Replace(result, @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
         if (_settings.StripBulletPoints)
         {
@@ -385,8 +378,12 @@ public sealed class MainForm : Form
         return ApplyFilterHtml(result);
     }
 
+    // TEXT-FIRST build: guarantees correct spacing/line breaks everywhere.
     private string BuildHtmlData(ClipItem item)
     {
+        if (_settings.PreserveSourceSpacing)
+            return HtmlClipboardHelper.PlainTextToHtml(ApplyFilter(item.Text));
+
         if (!string.IsNullOrWhiteSpace(item.Html)) return PrepareRichHtml(item.Html);
         if (_settings.RenderMarkdownForPlainText) return Markdown.ToHtml(item.Text, MarkdownPipeline);
         return HtmlClipboardHelper.PlainTextToHtml(item.Text);
@@ -480,9 +477,17 @@ public sealed class MainForm : Form
         try
         {
             text = ApplyFilter(text);
-            string htmlToUse = !string.IsNullOrWhiteSpace(html) ? PrepareRichHtml(html)
-                : _settings.RenderMarkdownForPlainText ? await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline))
-                : await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
+
+            string htmlToUse;
+            if (_settings.PreserveSourceSpacing)
+                htmlToUse = HtmlClipboardHelper.PlainTextToHtml(text);
+            else if (!string.IsNullOrWhiteSpace(html))
+                htmlToUse = PrepareRichHtml(html);
+            else if (_settings.RenderMarkdownForPlainText)
+                htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
+            else
+                htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
+
             string data = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
             bool ok = NativeClipboard.TrySetHtmlAndText(text, data);
             if (!ok) { var d = new DataObject(); d.SetData(DataFormats.UnicodeText, text); d.SetData(DataFormats.Html, data); ok = await TrySetClipboardAsync(d); }
