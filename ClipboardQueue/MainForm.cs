@@ -48,19 +48,8 @@ internal sealed class FilterWordsDialog : Form
             Text = string.Join(Environment.NewLine, words)
         };
 
-        var save = new Button
-        {
-            Text = "Save",
-            Dock = DockStyle.Bottom,
-            DialogResult = DialogResult.OK
-        };
-
-        var cancel = new Button
-        {
-            Text = "Cancel",
-            Dock = DockStyle.Bottom,
-            DialogResult = DialogResult.Cancel
-        };
+        var save = new Button { Text = "Save", Dock = DockStyle.Bottom, DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", Dock = DockStyle.Bottom, DialogResult = DialogResult.Cancel };
 
         Controls.Add(_box);
         Controls.Add(save);
@@ -163,40 +152,21 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.43";
+        Text = "Clipboard Queue 1.44";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = false;
 
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2
-        };
-
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        _listView = new ListView
-        {
-            Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            HideSelection = false,
-            MultiSelect = true
-        };
-
+        _listView = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = true };
         _listView.Columns.Add("Stored clipboard items (oldest first)", 750);
 
-        var buttonPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            WrapContents = true
-        };
+        var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
 
         var pasteNextButton = new Button { Text = "Paste next (Ctrl+V)", AutoSize = true };
         pasteNextButton.Click += (_, _) => PasteNext();
@@ -252,7 +222,6 @@ public sealed class MainForm : Form
 
         root.Controls.Add(_listView, 0, 0);
         root.Controls.Add(buttonPanel, 0, 1);
-
         Controls.Add(root);
 
         var trayMenu = new ContextMenuStrip();
@@ -408,9 +377,11 @@ public sealed class MainForm : Form
         string inner = string.Join("|", entries);
         string result = html;
 
-        // 1. Remove tag pairs containing ONLY the filter word (and optional whitespace),
-        //    plus one optional trailing space. Loop to handle nested tags.
-        string tagPattern = @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*(?:" + inner + @")\s*</\1>[ \t]?";
+        // 1. Remove tag pairs containing ONLY the filter word (and optional whitespace).
+        //    NOTE: we deliberately do NOT eat the space after the closing tag,
+        //    because sources insert empty spacer tags between words and eating
+        //    the following space would glue words together.
+        string tagPattern = @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*(?:" + inner + @")\s*</\1>";
         bool changed = true;
         while (changed)
         {
@@ -419,12 +390,12 @@ public sealed class MainForm : Form
             changed = result != before;
         }
 
-        // 2. Remove plain text occurrences (outside of tags) + trailing spaces.
+        // 2. Remove plain text occurrences (outside of tags) + their trailing spaces.
         string plainPattern = @"(?:" + inner + @")[ \t]*";
         result = Regex.Replace(result, @"<[^>]*>|" + plainPattern, m => m.Value.StartsWith("<") ? m.Value : string.Empty, RegexOptions.IgnoreCase);
 
-        // 3. Remove empty tags left over, plus one optional trailing space. Loop for nesting.
-        string emptyTagPattern = @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*</\1>[ \t]?";
+        // 3. Remove empty tags left over (again, WITHOUT eating following spaces).
+        string emptyTagPattern = @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*</\1>";
         changed = true;
         while (changed)
         {
