@@ -27,7 +27,7 @@ internal sealed class ClipItem
 
 /// <summary>
 /// Small dialog with a multi-line box: one filter word per line.
-/// Lines are stored exactly as typed (only empty lines are ignored).
+/// Enter creates a new line; Save / Cancel buttons close the dialog.
 /// </summary>
 internal sealed class FilterWordsDialog : Form
 {
@@ -70,7 +70,8 @@ internal sealed class FilterWordsDialog : Form
         Controls.Add(save);
         Controls.Add(cancel);
 
-        AcceptButton = save;
+        // No AcceptButton on purpose: Enter must create a new line,
+        // not close the dialog.
         CancelButton = cancel;
     }
 
@@ -167,7 +168,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.39";
+        Text = "Clipboard Queue 1.40";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -547,6 +548,10 @@ public sealed class MainForm : Form
             _settings.FilterWords = dialog.Words.ToList();
             SettingsManager.Save(_settings);
             RebuildFilterRegex();
+
+            // Re-prepare the clipboard so the new filter applies immediately,
+            // even to items that were copied earlier.
+            ScheduleSync();
         }
     }
 
@@ -643,6 +648,7 @@ public sealed class MainForm : Form
 
         _settings.StripHyperlinks = value;
         SettingsManager.Save(_settings);
+        ScheduleSync();
     }
 
     private void SetStripBulletPoints(bool value)
@@ -652,6 +658,7 @@ public sealed class MainForm : Form
 
         _settings.StripBulletPoints = value;
         SettingsManager.Save(_settings);
+        ScheduleSync();
     }
 
     private void Diag(string message)
@@ -746,7 +753,7 @@ public sealed class MainForm : Form
 
         lock (_sync)
         {
-            headText = _items.Count > 0 ? _items.Peek().Text : null;
+            headText = _items.Count > 0 ? ApplyFilter(_items.Peek().Text) : null;
         }
 
         string? clipText = null;
@@ -816,7 +823,7 @@ public sealed class MainForm : Form
             {
                 NativeClipboard.ProvideData(
                     format,
-                    Encoding.Unicode.GetBytes(item.Text + "\0"));
+                    Encoding.Unicode.GetBytes(ApplyFilter(item.Text) + "\0"));
             }
             else if (format == NativeClipboard.CfHtml)
             {
@@ -913,12 +920,14 @@ public sealed class MainForm : Form
         if (head == null)
             return;
 
+        string headText = ApplyFilter(head.Text);
+
         bool ok;
 
         if (_realMode)
         {
             string htmlData = HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head));
-            ok = NativeClipboard.TrySetHtmlAndText(head.Text, htmlData);
+            ok = NativeClipboard.TrySetHtmlAndText(headText, htmlData);
         }
         else
         {
@@ -932,7 +941,7 @@ public sealed class MainForm : Form
             _lastArmTime = DateTime.UtcNow;
             _renderedItem = null;
 
-            _lastProgrammaticClipboardText = head.Text;
+            _lastProgrammaticClipboardText = headText;
             _lastProgrammaticClipboardTime = DateTime.UtcNow;
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
@@ -1303,7 +1312,7 @@ public sealed class MainForm : Form
 
     private static string MakePreview(string text)
     {
-        string oneLine = text
+        string oneLine = ApplyFilter(text)
             .Replace("\r", string.Empty)
             .Replace("\n", " ⏎ ");
 
@@ -1463,6 +1472,10 @@ public sealed class MainForm : Form
     {
         try
         {
+            // The filter always applies at paste time, so items copied before
+            // the filter was configured are cleaned as well.
+            text = ApplyFilter(text);
+
             string htmlToUse;
 
             if (!string.IsNullOrWhiteSpace(html))
