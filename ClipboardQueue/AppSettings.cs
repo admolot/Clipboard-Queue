@@ -8,25 +8,39 @@ namespace ClipboardQueue;
 public sealed class AppSettings
 {
     public string PasteAllSeparator { get; set; } = Environment.NewLine + Environment.NewLine;
-    public bool OverrideCtrlV { get; set; } = true;
-    public bool RenderMarkdownForPlainText { get; set; } = false;
-    public bool InterceptAllPastes { get; set; } = true;
-    public bool Diagnostics { get; set; } = true;
-    public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
-    public bool StripHyperlinks { get; set; } = true;
-    public bool StripBulletPoints { get; set; } = false;
-    public bool EnableFilter { get; set; } = true;
-    public List<string> FilterWords { get; set; } = new List<string>();
 
-    // If true, the pasted HTML keeps the source's exact structure/spacing and
-    // only the word-filter is applied (no italics/bullet/block rewriting).
-    public bool PreserveSourceSpacing { get; set; } = true;
+    // If true, Ctrl+V pastes the oldest queued item whenever the queue is not empty.
+    public bool OverrideCtrlV { get; set; } = true;
+
+    // If true, plain-text copies (no HTML on clipboard) are rendered as Markdown.
+    public bool RenderMarkdownForPlainText { get; set; } = false;
+
+    // If true, the app owns the clipboard while the queue is not empty,
+    // so any paste method can paste the oldest item.
+    public bool InterceptAllPastes { get; set; } = true;
+
+    // If true, diagnostics.log is written (next to the exe).
+    public bool Diagnostics { get; set; } = true;
+
+    // Apps that read the clipboard via OLE (no delayed-render signals).
+    public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
+
+    // If true, hyperlinks are unwrapped to plain text on paste.
+    public bool StripHyperlinks { get; set; } = true;
+
+    // If true, bullet/list markers are removed on paste.
+    public bool StripBulletPoints { get; set; } = false;
 }
 
 public static class SettingsManager
 {
-    private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
-    private static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "settings.json");
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true
+    };
+
+    private static string SettingsPath =>
+        Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     public static AppSettings Load()
     {
@@ -36,7 +50,9 @@ public static class SettingsManager
             {
                 string json = File.ReadAllText(SettingsPath);
                 AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json);
-                if (settings != null) return settings;
+
+                if (settings != null)
+                    return settings;
             }
             else
             {
@@ -45,13 +61,21 @@ public static class SettingsManager
                 return defaults;
             }
         }
-        catch { }
+        catch
+        {
+        }
+
         return new AppSettings();
     }
 
     public static void Save(AppSettings settings)
     {
-        try { File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, Options)); }
-        catch { }
+        try
+        {
+            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, Options));
+        }
+        catch
+        {
+        }
     }
 }
