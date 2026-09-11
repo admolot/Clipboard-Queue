@@ -109,7 +109,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.36";
+        Text = "Clipboard Queue 1.37";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -881,16 +881,30 @@ public sealed class MainForm : Form
                 break;
         }
 
-        // Optional: remove list wrappers and bullet glyphs.
+        // Optional: remove lists completely - wrappers, items and glyphs -
+        // turning every list item into a plain paragraph.
         if (_settings.StripBulletPoints)
         {
+            // Drop list wrappers.
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
 
+            // Drop list-item closing tags.
+            result = Regex.Replace(result, @"</li>\s*", "", RegexOptions.IgnoreCase);
+
+            // Every list-item opening becomes a blank-line separator.
+            result = Regex.Replace(result, @"<li\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
+
+            // Remove literal bullet glyphs at line starts.
             result = Regex.Replace(
                 result,
                 @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
                 "",
                 RegexOptions.IgnoreCase);
+
+            // Normalize runs of line breaks (max one blank line).
+            result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"(\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
         }
 
         // Empty block elements (the usual representation of a blank line)
