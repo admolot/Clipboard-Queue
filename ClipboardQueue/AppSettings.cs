@@ -8,37 +8,25 @@ namespace ClipboardQueue;
 public sealed class AppSettings
 {
     public string PasteAllSeparator { get; set; } = Environment.NewLine + Environment.NewLine;
-
     public bool OverrideCtrlV { get; set; } = true;
-
     public bool RenderMarkdownForPlainText { get; set; } = false;
-
     public bool InterceptAllPastes { get; set; } = true;
-
     public bool Diagnostics { get; set; } = true;
-
     public List<string> RealDataApps { get; set; } = new List<string> { "anki" };
-
     public bool StripHyperlinks { get; set; } = true;
-
     public bool StripBulletPoints { get; set; } = false;
-
-    // If true, user-defined filter words are removed from text and HTML.
-    // If false, the filter logic is bypassed completely (zero CPU overhead).
     public bool EnableFilter { get; set; } = true;
-
     public List<string> FilterWords { get; set; } = new List<string>();
+
+    // If true, the pasted HTML keeps the source's exact structure/spacing and
+    // only the word-filter is applied (no italics/bullet/block rewriting).
+    public bool PreserveSourceSpacing { get; set; } = true;
 }
 
 public static class SettingsManager
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        WriteIndented = true
-    };
-
-    private static string SettingsPath =>
-        Path.Combine(AppContext.BaseDirectory, "settings.json");
+    private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
+    private static string SettingsPath => Path.Combine(AppContext.BaseDirectory, "settings.json");
 
     public static AppSettings Load()
     {
@@ -48,9 +36,7 @@ public static class SettingsManager
             {
                 string json = File.ReadAllText(SettingsPath);
                 AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json);
-
-                if (settings != null)
-                    return settings;
+                if (settings != null) return settings;
             }
             else
             {
@@ -59,21 +45,13 @@ public static class SettingsManager
                 return defaults;
             }
         }
-        catch
-        {
-        }
-
+        catch { }
         return new AppSettings();
     }
 
     public static void Save(AppSettings settings)
     {
-        try
-        {
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, Options));
-        }
-        catch
-        {
-        }
+        try { File.WriteAllText(SettingsPath, JsonSerializer.Serialize(settings, Options)); }
+        catch { }
     }
 }
