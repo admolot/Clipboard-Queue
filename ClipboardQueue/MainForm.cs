@@ -168,7 +168,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.40";
+        Text = "Clipboard Queue 1.41";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -1310,7 +1310,7 @@ public sealed class MainForm : Form
         _listView.EndUpdate();
     }
 
-    private static string MakePreview(string text)
+    private string MakePreview(string text)
     {
         string oneLine = ApplyFilter(text)
             .Replace("\r", string.Empty)
