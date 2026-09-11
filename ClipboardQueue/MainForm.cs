@@ -25,6 +25,61 @@ internal sealed class ClipItem
     public string? Html { get; }
 }
 
+/// <summary>
+/// Small dialog with a multi-line box: one filter word per line.
+/// </summary>
+internal sealed class FilterWordsDialog : Form
+{
+    private readonly TextBox _box;
+
+    public FilterWordsDialog(IEnumerable<string> words)
+    {
+        Text = "Filter words (one per line)";
+        Width = 420;
+        Height = 520;
+        StartPosition = FormStartPosition.CenterParent;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        ShowInTaskbar = false;
+
+        _box = new TextBox
+        {
+            Multiline = true,
+            Dock = DockStyle.Fill,
+            ScrollBars = ScrollBars.Vertical,
+            Text = string.Join(Environment.NewLine, words)
+        };
+
+        var save = new Button
+        {
+            Text = "Save",
+            Dock = DockStyle.Bottom,
+            DialogResult = DialogResult.OK
+        };
+
+        var cancel = new Button
+        {
+            Text = "Cancel",
+            Dock = DockStyle.Bottom,
+            DialogResult = DialogResult.Cancel
+        };
+
+        Controls.Add(_box);
+        Controls.Add(save);
+        Controls.Add(cancel);
+
+        AcceptButton = save;
+        CancelButton = cancel;
+    }
+
+    public string[] Words =>
+        _box.Text
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(w => w.Trim())
+            .Where(w => w.Length > 0)
+            .ToArray();
+}
+
 public sealed class MainForm : Form
 {
     private const int MaxItems = 500;
@@ -92,6 +147,8 @@ public sealed class MainForm : Form
     private long _consumedCount;
     private long _confirmConsumedCount;
 
+    private string? _filterPattern;
+
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
 
@@ -109,7 +166,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.37";
+        Text = "Clipboard Queue 1.38";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -179,6 +236,13 @@ public sealed class MainForm : Form
         };
         minimizeToTrayButton.Click += (_, _) => HideQueueWindow();
 
+        var filterButton = new Button
+        {
+            Text = "Filter words…",
+            AutoSize = true
+        };
+        filterButton.Click += (_, _) => OpenFilterDialog();
+
         _pauseCheckBox = new CheckBox
         {
             Text = "Pause monitoring",
@@ -231,6 +295,7 @@ public sealed class MainForm : Form
         buttonPanel.Controls.Add(deleteSelectedButton);
         buttonPanel.Controls.Add(clearAllButton);
         buttonPanel.Controls.Add(minimizeToTrayButton);
+        buttonPanel.Controls.Add(filterButton);
         buttonPanel.Controls.Add(_pauseCheckBox);
         buttonPanel.Controls.Add(_startupCheckBox);
         buttonPanel.Controls.Add(_loggingCheckBox);
@@ -323,6 +388,8 @@ public sealed class MainForm : Form
         _uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
 
         _cursorCounter = new CursorCounter();
+
+        RebuildFilterRegex();
 
         NativeMethods.AddClipboardFormatListener(Handle);
 
@@ -464,6 +531,56 @@ public sealed class MainForm : Form
 
         Cleanup();
         base.OnFormClosing(e);
+    }
+
+    // ------------------------------------------------------------------
+    // Filter words.
+    // ------------------------------------------------------------------
+
+    private void OpenFilterDialog()
+    {
+        using var dialog = new FilterWordsDialog(_settings.FilterWords);
+
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _settings.FilterWords = dialog.Words.ToList();
+            SettingsManager.Save(_settings);
+            RebuildFilterRegex();
+        }
+    }
+
+    private void RebuildFilterRegex()
+    {
+        var entries = (_settings.FilterWords ?? new List<string>())
+            .Select(w => w.Trim())
+            .Where(w => w.Length > 0)
+            .Select(Regex.Escape)
+            .ToList();
+
+        // Each entry also swallows spaces/tabs directly after it,
+        // so "word:" removes "word: " including the space.
+        _filterPattern = entries.Count == 0
+            ? null
+            : "(?:" + string.Join("|", entries) + ")[ \t]*";
+    }
+
+    private string ApplyFilter(string text)
+    {
+        return _filterPattern == null
+            ? text
+            : Regex.Replace(text, _filterPattern, string.Empty);
+    }
+
+    private string ApplyFilterHtml(string html)
+    {
+        if (_filterPattern == null)
+            return html;
+
+        // Remove filter matches only outside of HTML tags.
+        return Regex.Replace(
+            html,
+            @"<[^>]*>|" + _filterPattern,
+            m => m.Value.StartsWith("<") ? m.Value : string.Empty);
     }
 
     private void OnFocusPoll()
@@ -828,14 +945,15 @@ public sealed class MainForm : Form
 
     private string CleanText(string text)
     {
-        if (!_settings.StripBulletPoints)
-            return text;
+        if (_settings.StripBulletPoints)
+        {
+            text = Regex.Replace(
+                text,
+                @"(?m)^[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
+                "");
+        }
 
-        // Remove leading bullet markers from each line.
-        return Regex.Replace(
-            text,
-            @"(?m)^[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
-            "");
+        return ApplyFilter(text);
     }
 
     private string PrepareRichHtml(string html)
@@ -885,23 +1003,16 @@ public sealed class MainForm : Form
         // turning every list item into a plain paragraph.
         if (_settings.StripBulletPoints)
         {
-            // Drop list wrappers.
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
-
-            // Drop list-item closing tags.
             result = Regex.Replace(result, @"</li>\s*", "", RegexOptions.IgnoreCase);
-
-            // Every list-item opening becomes a blank-line separator.
             result = Regex.Replace(result, @"<li\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
 
-            // Remove literal bullet glyphs at line starts.
             result = Regex.Replace(
                 result,
                 @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
                 "",
                 RegexOptions.IgnoreCase);
 
-            // Normalize runs of line breaks (max one blank line).
             result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"(\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
@@ -926,6 +1037,9 @@ public sealed class MainForm : Form
         // Drop a single outer wrapper pair if present.
         result = Regex.Replace(result, @"^\s*<(div|p)[^>]*>", "", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"</(div|p)>\s*$", "", RegexOptions.IgnoreCase);
+
+        // Remove user-defined filter words (outside of tags).
+        result = ApplyFilterHtml(result);
 
         return result;
     }
