@@ -168,7 +168,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.41";
+        Text = "Clipboard Queue 1.42";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -557,17 +557,29 @@ public sealed class MainForm : Form
 
     private void RebuildFilterRegex()
     {
-        // Entries are used exactly as typed (including trailing spaces).
+        // Entries are matched trimmed (trailing spaces you typed are still
+        // swallowed separately by the [ \t]* part of the pattern).
         var entries = (_settings.FilterWords ?? new List<string>())
-            .Where(w => !string.IsNullOrWhiteSpace(w))
+            .Select(w => w.TrimEnd())
+            .Where(w => w.Length > 0)
             .Select(Regex.Escape)
             .ToList();
 
-        // Any spaces/tabs directly after an entry are swallowed as well,
-        // so "word:" also removes "word: ".
-        _filterPattern = entries.Count == 0
-            ? null
-            : "(?:" + string.Join("|", entries) + ")[ \t]*";
+        if (entries.Count == 0)
+        {
+            _filterPattern = null;
+            return;
+        }
+
+        string inner = string.Join("|", entries);
+
+        // Two shapes are removed:
+        //  1) the entry fully wrapped in one inline tag pair, e.g.
+        //     <b>Definition:</b>  -> the whole pair plus one following space;
+        //  2) the entry as plain text, plus any spaces/tabs after it.
+        _filterPattern =
+            @"(?:<(?<fgtag>b|strong|em|i|span|a)\b[^>]*>(?:" + inner + @")[ \t]*</\k<fgtag>>[ \t]?" +
+            @"|(?:" + inner + @")[ \t]*)";
     }
 
     private string ApplyFilter(string text)
@@ -582,11 +594,24 @@ public sealed class MainForm : Form
         if (_filterPattern == null)
             return html;
 
-        // Remove filter matches only outside of HTML tags.
-        return Regex.Replace(
-            html,
-            @"<[^>]*>|" + _filterPattern,
-            m => m.Value.StartsWith("<") ? m.Value : string.Empty);
+        string result = Regex.Replace(html, _filterPattern, string.Empty);
+
+        // Collapse inline tags that became empty after filtering.
+        for (int i = 0; i < 6; i++)
+        {
+            string before = result;
+
+            result = Regex.Replace(
+                result,
+                @"<(b|strong|em|i|span|a)\b[^>]*>\s*</\1>",
+                string.Empty,
+                RegexOptions.IgnoreCase);
+
+            if (before == result)
+                break;
+        }
+
+        return result;
     }
 
     private void OnFocusPoll()
@@ -1048,7 +1073,7 @@ public sealed class MainForm : Form
         result = Regex.Replace(result, @"^\s*<(div|p)[^>]*>", "", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"</(div|p)>\s*$", "", RegexOptions.IgnoreCase);
 
-        // Remove user-defined filter words (outside of tags).
+        // Remove user-defined filter words (including tag-wrapped ones).
         result = ApplyFilterHtml(result);
 
         return result;
