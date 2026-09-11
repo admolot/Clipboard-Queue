@@ -838,97 +838,53 @@ public sealed class MainForm : Form
             "");
     }
 
+
+    
     private string PrepareRichHtml(string html)
     {
         string result = html;
 
-        // Optional: unwrap hyperlinks, keeping only their text.
         if (_settings.StripHyperlinks)
         {
-            for (int pass = 0; pass < 6; pass++)
+            for (int p = 0; p < 6; p++)
             {
-                string before = result;
-
-                result = Regex.Replace(
-                    result,
-                    @"<a\b[^>]*>(.*?)</a>",
-                    "$1",
-                    RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-                if (result == before)
-                    break;
+                string b = result;
+                result = Regex.Replace(result, @"<a\b[^>]*>(.*?)</a>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                if (b == result) break;
             }
         }
 
         // Italics are always removed (inner text kept).
-        for (int pass = 0; pass < 6; pass++)
+        for (int p = 0; p < 6; p++)
         {
-            string before = result;
-
-            result = Regex.Replace(
-                result,
-                @"<(em|i)\b[^>]*>(.*?)</\1>",
-                "$2",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-            result = Regex.Replace(
-                result,
-                @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>",
-                "$1",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-            if (result == before)
-                break;
+            string b = result;
+            result = Regex.Replace(result, @"<(em|i)\b[^>]*>(.*?)</\1>", "$2", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            result = Regex.Replace(result, @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (b == result) break;
         }
 
-        // Optional: remove lists completely - wrappers, items and glyphs -
-        // turning every list item into a plain paragraph.
         if (_settings.StripBulletPoints)
         {
-            // Drop list wrappers.
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
-
-            // Drop list-item closing tags.
-            result = Regex.Replace(result, @"</li>\s*", "", RegexOptions.IgnoreCase);
-
-            // Every list-item opening becomes a blank-line separator.
-            result = Regex.Replace(result, @"<li\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
-
-            // Remove literal bullet glyphs at line starts.
-            result = Regex.Replace(
-                result,
-                @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
-                "",
-                RegexOptions.IgnoreCase);
-
-            // Normalize runs of line breaks (max one blank line).
-            result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"(\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"<li\b[^>]*>", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"</li>", "<br>", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "", RegexOptions.IgnoreCase);
         }
 
-        // Empty block elements (the usual representation of a blank line)
-        // become a single line break.
-        result = Regex.Replace(
-            result,
-            @"<(div|p|h[1-6]|li)[^>]*>\s*(?:<br\s*/?>)?\s*</\1>",
-            "<br>",
-            RegexOptions.IgnoreCase);
+        // Keep the source's block structure so line spacing stays natural, and
+        // only make sure EMPTY blocks contain a <br> so editors like Anki do
+        // not collapse them (which would lose explicit blank lines).
+        for (int p = 0; p < 6; p++)
+        {
+            string b = result;
+            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)(\b[^>]*)>\s*</\1>", "<$1$2><br></$1>", RegexOptions.IgnoreCase);
+            if (b == result) break;
+        }
 
-        // A boundary between two blocks becomes a blank line
-        // (two line breaks), which is what the visual gap means.
-        result = Regex.Replace(
-            result,
-            @"</(div|p|h[1-6]|li)>\s*<(div|p|h[1-6]|li)[^>]*>",
-            "<br><br>",
-            RegexOptions.IgnoreCase);
-
-        // Drop a single outer wrapper pair if present.
-        result = Regex.Replace(result, @"^\s*<(div|p)[^>]*>", "", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"</(div|p)>\s*$", "", RegexOptions.IgnoreCase);
-
-        return result;
+        // v1.37 filter words still applied last.
+        return ApplyFilterHtml(result);
     }
+
 
     private string BuildHtmlData(ClipItem item)
     {
