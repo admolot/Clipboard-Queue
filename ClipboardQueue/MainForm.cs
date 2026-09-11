@@ -27,6 +27,7 @@ internal sealed class ClipItem
 
 /// <summary>
 /// Small dialog with a multi-line box: one filter word per line.
+/// Lines are stored exactly as typed (only empty lines are ignored).
 /// </summary>
 internal sealed class FilterWordsDialog : Form
 {
@@ -47,6 +48,7 @@ internal sealed class FilterWordsDialog : Form
             Multiline = true,
             Dock = DockStyle.Fill,
             ScrollBars = ScrollBars.Vertical,
+            WordWrap = false,
             Text = string.Join(Environment.NewLine, words)
         };
 
@@ -74,9 +76,8 @@ internal sealed class FilterWordsDialog : Form
 
     public string[] Words =>
         _box.Text
-            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(w => w.Trim())
-            .Where(w => w.Length > 0)
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.None)
+            .Where(line => !string.IsNullOrWhiteSpace(line))
             .ToArray();
 }
 
@@ -166,7 +167,7 @@ public sealed class MainForm : Form
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
 
-        Text = "Clipboard Queue 1.38";
+        Text = "Clipboard Queue 1.39";
         Width = 800;
         Height = 500;
         MinimumSize = new Size(500, 300);
@@ -551,14 +552,14 @@ public sealed class MainForm : Form
 
     private void RebuildFilterRegex()
     {
+        // Entries are used exactly as typed (including trailing spaces).
         var entries = (_settings.FilterWords ?? new List<string>())
-            .Select(w => w.Trim())
-            .Where(w => w.Length > 0)
+            .Where(w => !string.IsNullOrWhiteSpace(w))
             .Select(Regex.Escape)
             .ToList();
 
-        // Each entry also swallows spaces/tabs directly after it,
-        // so "word:" removes "word: " including the space.
+        // Any spaces/tabs directly after an entry are swallowed as well,
+        // so "word:" also removes "word: ".
         _filterPattern = entries.Count == 0
             ? null
             : "(?:" + string.Join("|", entries) + ")[ \t]*";
