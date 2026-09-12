@@ -118,7 +118,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.53";
+        Text = "Clipboard Queue 1.54";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -139,7 +139,7 @@ public sealed class MainForm : Form
         _pauseCheckBox = new CheckBox { Text = "Pause monitoring", AutoSize = true, Checked = false }; _pauseCheckBox.CheckedChanged += (_, _) => SetPauseMonitoring(_pauseCheckBox.Checked);
         _startupCheckBox = new CheckBox { Text = "Start with Windows", AutoSize = true, Checked = StartupManager.IsEnabled() }; _startupCheckBox.CheckedChanged += (_, _) => SetStartWithWindows(_startupCheckBox.Checked);
         _loggingCheckBox = new CheckBox { Text = "Logging", AutoSize = true, Checked = _settings.Diagnostics }; _loggingCheckBox.CheckedChanged += (_, _) => SetLogging(_loggingCheckBox.Checked);
-        _enableFilterCheckBox = new CheckBox { Text = "Enable filter", AutoSize = true, Checked = _settings.EnableFilter }; _enableFilterCheckBox.CheckedChanged += (_, _) => SetEnableFilter(_enableFilterCheckBox.Checked);
+        _enableFilterCheckBox = new CheckBox { Text = "Enable filter (plain text)", AutoSize = true, Checked = _settings.EnableFilter }; _enableFilterCheckBox.CheckedChanged += (_, _) => SetEnableFilter(_enableFilterCheckBox.Checked);
         _stripLinksCheckBox = new CheckBox { Text = "Strip hyperlinks", AutoSize = true, Checked = _settings.StripHyperlinks }; _stripLinksCheckBox.CheckedChanged += (_, _) => SetStripHyperlinks(_stripLinksCheckBox.Checked);
         _stripBulletsCheckBox = new CheckBox { Text = "Strip bullet points", AutoSize = true, Checked = _settings.StripBulletPoints }; _stripBulletsCheckBox.CheckedChanged += (_, _) => SetStripBulletPoints(_stripBulletsCheckBox.Checked);
         _gapBlanksCheckBox = new CheckBox { Text = "Blank line at paragraph gaps", AutoSize = true, Checked = _settings.ParagraphGapBlankLines }; _gapBlanksCheckBox.CheckedChanged += (_, _) => SetGapBlanks(_gapBlanksCheckBox.Checked);
@@ -222,56 +222,6 @@ public sealed class MainForm : Form
     }
 
     private string ApplyFilter(string text) => (_filterPattern == null || !_settings.EnableFilter) ? text : Regex.Replace(text, _filterPattern, string.Empty);
-
-    private string ApplyFilterHtml(string html)
-    {
-        if (!_settings.EnableFilter || _filterPattern == null || string.IsNullOrEmpty(html)) return html;
-        var entries = (_settings.FilterWords ?? new List<string>()).Select(w => w.TrimEnd()).Where(w => w.Length > 0).Select(Regex.Escape).ToList();
-        if (entries.Count == 0) return html;
-        string inner = string.Join("|", entries);
-        var wordRe = new Regex(@"(?:" + inner + @")[ \t]*", RegexOptions.IgnoreCase);
-        var fullRe = new Regex(@"^\s*(?:" + inner + @")\s*$", RegexOptions.IgnoreCase);
-        var tokens = Regex.Split(html, @"(<[^>]*>)");
-        int n = tokens.Length;
-        var work = new string[n]; var filtered = new string[n]; var isTag = new bool[n]; var removed = new bool[n]; var trimLeading = new bool[n];
-        var stack = new Stack<int>();
-        for (int i = 0; i < n; i++)
-        {
-            string t = tokens[i];
-            if (string.IsNullOrEmpty(t)) { removed[i] = true; continue; }
-            if (t[0] == '<')
-            {
-                isTag[i] = true;
-                bool isClose = t.Length > 1 && t[1] == '/';
-                bool selfClose = t.EndsWith("/>");
-                if (!isClose && !selfClose) stack.Push(i);
-                else if (isClose && stack.Count > 0)
-                {
-                    int open = stack.Pop();
-                    var sb = new StringBuilder(); bool pure = true;
-                    for (int k = open + 1; k < i; k++) { if (isTag[k]) { pure = false; break; } if (removed[k]) continue; if (work[k] == null) { pure = false; break; } sb.Append(work[k]); }
-                    if (pure && fullRe.IsMatch(sb.ToString()))
-                    {
-                        removed[open] = true; removed[i] = true;
-                        for (int k = open + 1; k < i; k++) removed[k] = true;
-                        for (int k = i + 1; k < n; k++) { string nt = tokens[k]; if (string.IsNullOrEmpty(nt)) continue; if (nt[0] == '<') continue; trimLeading[k] = true; break; }
-                    }
-                }
-            }
-            else
-            {
-                string w = t;
-                if (trimLeading[i] && (w[0] == ' ' || w[0] == '\t')) w = w.Substring(1);
-                work[i] = w;
-            }
-        }
-        for (int i = 0; i < n; i++) if (!isTag[i] && !removed[i] && work[i] != null) filtered[i] = wordRe.Replace(work[i], "");
-        var result = new StringBuilder();
-        for (int i = 0; i < n; i++) { if (removed[i]) continue; result.Append(isTag[i] ? tokens[i] : filtered[i]); }
-        string s = result.ToString();
-        for (int pass = 0; pass < 6; pass++) { string before = s; s = Regex.Replace(s, @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*</\1>", "", RegexOptions.IgnoreCase); if (before == s) break; }
-        return s;
-    }
 
     private void OnFocusPoll()
     {
@@ -357,6 +307,7 @@ public sealed class MainForm : Form
         return ApplyFilter(text);
     }
 
+    // Rich-HTML cleanup (used only when the filter is OFF).
     private string PrepareRichHtml(string html)
     {
         string result = html;
@@ -366,25 +317,24 @@ public sealed class MainForm : Form
 
         for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<(em|i)\b[^>]*>(.*?)</\1>", "$2", RegexOptions.IgnoreCase | RegexOptions.Singleline); result = Regex.Replace(result, @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
 
+        // Headings are bold only via browser default style; make it explicit so
+        // the bold survives after we strip the heading tag.
+        for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<h([1-6])\b[^>]*>(.*?)</h\1>", "<b>$2</b><br>", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
+
         if (_settings.StripBulletPoints)
         {
-            // Remove list wrappers and bullet glyphs, but leave <li> tags so the
-            // block normalization below decides the line breaks uniformly.
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "", RegexOptions.IgnoreCase);
         }
 
         if (_settings.ParagraphGapBlankLines)
         {
-            // AI-Studio-style: paragraph gaps ARE the blank lines.
             result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>\s*<(div|p|h[1-6]|li)\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "", RegexOptions.IgnoreCase);
         }
         else
         {
-            // Google-style: blank lines come from empty blocks; normal block
-            // boundaries are single line breaks.
             result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "<br>", RegexOptions.IgnoreCase);
         }
@@ -393,11 +343,16 @@ public sealed class MainForm : Form
         result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"(?:\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
 
-        return ApplyFilterHtml(result);
+        return result;
     }
 
     private string BuildHtmlData(ClipItem item)
     {
+        // When the filter is ON we paste pure plain text (all code stripped),
+        // then filter words from that plain text.
+        if (_settings.EnableFilter)
+            return HtmlClipboardHelper.PlainTextToHtml(ApplyFilter(item.Text));
+
         if (!string.IsNullOrWhiteSpace(item.Html)) return PrepareRichHtml(item.Html);
         if (_settings.RenderMarkdownForPlainText) return Markdown.ToHtml(item.Text, MarkdownPipeline);
         return HtmlClipboardHelper.PlainTextToHtml(item.Text);
@@ -491,10 +446,17 @@ public sealed class MainForm : Form
         try
         {
             text = ApplyFilter(text);
+
             string htmlToUse;
-            if (!string.IsNullOrWhiteSpace(html)) htmlToUse = PrepareRichHtml(html);
-            else if (_settings.RenderMarkdownForPlainText) htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
-            else htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
+            if (_settings.EnableFilter)
+                htmlToUse = HtmlClipboardHelper.PlainTextToHtml(text);
+            else if (!string.IsNullOrWhiteSpace(html))
+                htmlToUse = PrepareRichHtml(html);
+            else if (_settings.RenderMarkdownForPlainText)
+                htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
+            else
+                htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
+
             string data = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
             bool ok = NativeClipboard.TrySetHtmlAndText(text, data);
             if (!ok) { var d = new DataObject(); d.SetData(DataFormats.UnicodeText, text); d.SetData(DataFormats.Html, data); ok = await TrySetClipboardAsync(d); }
