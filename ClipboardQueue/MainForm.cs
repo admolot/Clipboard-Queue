@@ -14,15 +14,27 @@ namespace ClipboardQueue;
 
 internal sealed class ClipItem
 {
-    public ClipItem(string text, string? html)
-    {
-        Text = text;
-        Html = html;
-    }
-
+    public ClipItem(string text, string? html) { Text = text; Html = html; }
     public string Text { get; }
-
     public string? Html { get; }
+}
+
+internal sealed class FilterWordsDialog : Form
+{
+    private readonly TextBox _box;
+    public FilterWordsDialog(IEnumerable<string> words)
+    {
+        Text = "Filter words (one per line)";
+        Width = 420; Height = 520;
+        StartPosition = FormStartPosition.CenterParent;
+        MinimizeBox = false; MaximizeBox = false; ShowInTaskbar = false;
+        _box = new TextBox { Multiline = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Vertical, WordWrap = false, Text = string.Join(Environment.NewLine, words) };
+        var save = new Button { Text = "Save", Dock = DockStyle.Bottom, DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", Dock = DockStyle.Bottom, DialogResult = DialogResult.Cancel };
+        Controls.Add(_box); Controls.Add(save); Controls.Add(cancel);
+        CancelButton = cancel;
+    }
+    public string[] Words => _box.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.None).Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
 }
 
 public sealed class MainForm : Form
@@ -42,7 +54,6 @@ public sealed class MainForm : Form
 
     private readonly Queue<ClipItem> _items = new();
     private readonly object _sync = new();
-
     private readonly AppSettings _settings;
     private readonly bool _startHidden;
 
@@ -51,6 +62,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _pauseCheckBox;
     private readonly CheckBox _startupCheckBox;
     private readonly CheckBox _loggingCheckBox;
+    private readonly CheckBox _enableFilterCheckBox;
     private readonly CheckBox _stripLinksCheckBox;
     private readonly CheckBox _stripBulletsCheckBox;
     private readonly NotifyIcon _notifyIcon;
@@ -91,777 +103,267 @@ public sealed class MainForm : Form
 
     private long _consumedCount;
     private long _confirmConsumedCount;
+    private string? _filterPattern;
 
     private string _lastProgrammaticClipboardText = string.Empty;
     private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
-
     private string _lastStoredText = string.Empty;
     private string? _lastStoredHtml;
     private DateTime _lastStoredTime = DateTime.MinValue;
 
-    private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
-        .UseAdvancedExtensions()
-        .UseSoftlineBreakAsHardlineBreak()
-        .Build();
+    private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder().UseAdvancedExtensions().UseSoftlineBreakAsHardlineBreak().Build();
 
     public MainForm(bool startHidden)
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
+        Text = "Clipboard Queue 1.51";
+        Width = 800; Height = 500; MinimumSize = new Size(500, 300);
+        StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
-        Text = "Clipboard Queue 1.37";
-        Width = 800;
-        Height = 500;
-        MinimumSize = new Size(500, 300);
-        StartPosition = FormStartPosition.CenterScreen;
-        ShowInTaskbar = false;
-
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2
-        };
-
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        _listView = new ListView
-        {
-            Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            HideSelection = false,
-            MultiSelect = true
-        };
-
+        _listView = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, MultiSelect = true };
         _listView.Columns.Add("Stored clipboard items (oldest first)", 750);
+        var buttonPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
 
-        var buttonPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            WrapContents = true
-        };
+        var pasteNextButton = new Button { Text = "Paste next (Ctrl+V)", AutoSize = true }; pasteNextButton.Click += (_, _) => PasteNext();
+        var pasteAllButton = new Button { Text = "Paste all (Ctrl+Alt+V or Ctrl+V + left mouse)", AutoSize = true }; pasteAllButton.Click += (_, _) => PasteAll();
+        var deleteSelectedButton = new Button { Text = "Delete selected", AutoSize = true }; deleteSelectedButton.Click += (_, _) => DeleteSelected();
+        var clearAllButton = new Button { Text = "Clear all", AutoSize = true }; clearAllButton.Click += (_, _) => ClearAll();
+        var minimizeToTrayButton = new Button { Text = "Minimize to tray", AutoSize = true }; minimizeToTrayButton.Click += (_, _) => HideQueueWindow();
+        var filterButton = new Button { Text = "Filter words…", AutoSize = true }; filterButton.Click += (_, _) => OpenFilterDialog();
 
-        var pasteNextButton = new Button
-        {
-            Text = "Paste next (Ctrl+V)",
-            AutoSize = true
-        };
-        pasteNextButton.Click += (_, _) => PasteNext();
+        _pauseCheckBox = new CheckBox { Text = "Pause monitoring", AutoSize = true, Checked = false }; _pauseCheckBox.CheckedChanged += (_, _) => SetPauseMonitoring(_pauseCheckBox.Checked);
+        _startupCheckBox = new CheckBox { Text = "Start with Windows", AutoSize = true, Checked = StartupManager.IsEnabled() }; _startupCheckBox.CheckedChanged += (_, _) => SetStartWithWindows(_startupCheckBox.Checked);
+        _loggingCheckBox = new CheckBox { Text = "Logging", AutoSize = true, Checked = _settings.Diagnostics }; _loggingCheckBox.CheckedChanged += (_, _) => SetLogging(_loggingCheckBox.Checked);
+        _enableFilterCheckBox = new CheckBox { Text = "Enable filter", AutoSize = true, Checked = _settings.EnableFilter }; _enableFilterCheckBox.CheckedChanged += (_, _) => SetEnableFilter(_enableFilterCheckBox.Checked);
+        _stripLinksCheckBox = new CheckBox { Text = "Strip hyperlinks", AutoSize = true, Checked = _settings.StripHyperlinks }; _stripLinksCheckBox.CheckedChanged += (_, _) => SetStripHyperlinks(_stripLinksCheckBox.Checked);
+        _stripBulletsCheckBox = new CheckBox { Text = "Strip bullet points", AutoSize = true, Checked = _settings.StripBulletPoints }; _stripBulletsCheckBox.CheckedChanged += (_, _) => SetStripBulletPoints(_stripBulletsCheckBox.Checked);
+        _countLabel = new Label { AutoSize = true, Text = "0 items", TextAlign = ContentAlignment.MiddleLeft };
 
-        var pasteAllButton = new Button
-        {
-            Text = "Paste all (Ctrl+Alt+V or Ctrl+V + left mouse)",
-            AutoSize = true
-        };
-        pasteAllButton.Click += (_, _) => PasteAll();
-
-        var deleteSelectedButton = new Button
-        {
-            Text = "Delete selected",
-            AutoSize = true
-        };
-        deleteSelectedButton.Click += (_, _) => DeleteSelected();
-
-        var clearAllButton = new Button
-        {
-            Text = "Clear all",
-            AutoSize = true
-        };
-        clearAllButton.Click += (_, _) => ClearAll();
-
-        var minimizeToTrayButton = new Button
-        {
-            Text = "Minimize to tray",
-            AutoSize = true
-        };
-        minimizeToTrayButton.Click += (_, _) => HideQueueWindow();
-
-        _pauseCheckBox = new CheckBox
-        {
-            Text = "Pause monitoring",
-            AutoSize = true,
-            Checked = false
-        };
-        _pauseCheckBox.CheckedChanged += (_, _) => SetPauseMonitoring(_pauseCheckBox.Checked);
-
-        _startupCheckBox = new CheckBox
-        {
-            Text = "Start with Windows",
-            AutoSize = true,
-            Checked = StartupManager.IsEnabled()
-        };
-        _startupCheckBox.CheckedChanged += (_, _) => SetStartWithWindows(_startupCheckBox.Checked);
-
-        _loggingCheckBox = new CheckBox
-        {
-            Text = "Logging",
-            AutoSize = true,
-            Checked = _settings.Diagnostics
-        };
-        _loggingCheckBox.CheckedChanged += (_, _) => SetLogging(_loggingCheckBox.Checked);
-
-        _stripLinksCheckBox = new CheckBox
-        {
-            Text = "Strip hyperlinks",
-            AutoSize = true,
-            Checked = _settings.StripHyperlinks
-        };
-        _stripLinksCheckBox.CheckedChanged += (_, _) => SetStripHyperlinks(_stripLinksCheckBox.Checked);
-
-        _stripBulletsCheckBox = new CheckBox
-        {
-            Text = "Strip bullet points",
-            AutoSize = true,
-            Checked = _settings.StripBulletPoints
-        };
-        _stripBulletsCheckBox.CheckedChanged += (_, _) => SetStripBulletPoints(_stripBulletsCheckBox.Checked);
-
-        _countLabel = new Label
-        {
-            AutoSize = true,
-            Text = "0 items",
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-
-        buttonPanel.Controls.Add(pasteNextButton);
-        buttonPanel.Controls.Add(pasteAllButton);
-        buttonPanel.Controls.Add(deleteSelectedButton);
-        buttonPanel.Controls.Add(clearAllButton);
-        buttonPanel.Controls.Add(minimizeToTrayButton);
-        buttonPanel.Controls.Add(_pauseCheckBox);
-        buttonPanel.Controls.Add(_startupCheckBox);
-        buttonPanel.Controls.Add(_loggingCheckBox);
-        buttonPanel.Controls.Add(_stripLinksCheckBox);
-        buttonPanel.Controls.Add(_stripBulletsCheckBox);
+        buttonPanel.Controls.Add(pasteNextButton); buttonPanel.Controls.Add(pasteAllButton); buttonPanel.Controls.Add(deleteSelectedButton);
+        buttonPanel.Controls.Add(clearAllButton); buttonPanel.Controls.Add(minimizeToTrayButton); buttonPanel.Controls.Add(filterButton);
+        buttonPanel.Controls.Add(_pauseCheckBox); buttonPanel.Controls.Add(_startupCheckBox); buttonPanel.Controls.Add(_loggingCheckBox);
+        buttonPanel.Controls.Add(_enableFilterCheckBox); buttonPanel.Controls.Add(_stripLinksCheckBox); buttonPanel.Controls.Add(_stripBulletsCheckBox);
         buttonPanel.Controls.Add(_countLabel);
 
-        root.Controls.Add(_listView, 0, 0);
-        root.Controls.Add(buttonPanel, 0, 1);
-
-        Controls.Add(root);
+        root.Controls.Add(_listView, 0, 0); root.Controls.Add(buttonPanel, 0, 1); Controls.Add(root);
 
         var trayMenu = new ContextMenuStrip();
-
-        var openItem = new ToolStripMenuItem("Open");
-        openItem.Click += (_, _) => ShowQueueWindow();
-
-        var trayPasteNext = new ToolStripMenuItem("Paste next");
-        trayPasteNext.Click += (_, _) => PasteNext();
-
-        var trayPasteAll = new ToolStripMenuItem("Paste all");
-        trayPasteAll.Click += (_, _) => PasteAll();
-
-        _pauseMenuItem = new ToolStripMenuItem("Pause monitoring")
-        {
-            CheckOnClick = true,
-            Checked = false
-        };
-        _pauseMenuItem.Click += (_, _) => SetPauseMonitoring(_pauseMenuItem.Checked);
-
-        _startupMenuItem = new ToolStripMenuItem("Start with Windows")
-        {
-            CheckOnClick = true,
-            Checked = StartupManager.IsEnabled()
-        };
-        _startupMenuItem.Click += (_, _) => SetStartWithWindows(_startupMenuItem.Checked);
-
-        var clearMenuItem = new ToolStripMenuItem("Clear all");
-        clearMenuItem.Click += (_, _) => ClearAll();
-
-        var minimizeToTrayItem = new ToolStripMenuItem("Minimize to tray");
-        minimizeToTrayItem.Click += (_, _) => HideQueueWindow();
-
-        var exitItem = new ToolStripMenuItem("Exit");
-        exitItem.Click += (_, _) => ExitApplication();
-
-        trayMenu.Items.Add(openItem);
-        trayMenu.Items.Add(new ToolStripSeparator());
-        trayMenu.Items.Add(trayPasteNext);
-        trayMenu.Items.Add(trayPasteAll);
-        trayMenu.Items.Add(new ToolStripSeparator());
-        trayMenu.Items.Add(_pauseMenuItem);
-        trayMenu.Items.Add(_startupMenuItem);
-        trayMenu.Items.Add(clearMenuItem);
-        trayMenu.Items.Add(minimizeToTrayItem);
-        trayMenu.Items.Add(new ToolStripSeparator());
-        trayMenu.Items.Add(exitItem);
+        var openItem = new ToolStripMenuItem("Open"); openItem.Click += (_, _) => ShowQueueWindow();
+        var trayPasteNext = new ToolStripMenuItem("Paste next"); trayPasteNext.Click += (_, _) => PasteNext();
+        var trayPasteAll = new ToolStripMenuItem("Paste all"); trayPasteAll.Click += (_, _) => PasteAll();
+        _pauseMenuItem = new ToolStripMenuItem("Pause monitoring") { CheckOnClick = true, Checked = false }; _pauseMenuItem.Click += (_, _) => SetPauseMonitoring(_pauseMenuItem.Checked);
+        _startupMenuItem = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true, Checked = StartupManager.IsEnabled() }; _startupMenuItem.Click += (_, _) => SetStartWithWindows(_startupMenuItem.Checked);
+        var clearMenuItem = new ToolStripMenuItem("Clear all"); clearMenuItem.Click += (_, _) => ClearAll();
+        var minimizeToTrayItem = new ToolStripMenuItem("Minimize to tray"); minimizeToTrayItem.Click += (_, _) => HideQueueWindow();
+        var exitItem = new ToolStripMenuItem("Exit"); exitItem.Click += (_, _) => ExitApplication();
+        trayMenu.Items.Add(openItem); trayMenu.Items.Add(new ToolStripSeparator()); trayMenu.Items.Add(trayPasteNext); trayMenu.Items.Add(trayPasteAll);
+        trayMenu.Items.Add(new ToolStripSeparator()); trayMenu.Items.Add(_pauseMenuItem); trayMenu.Items.Add(_startupMenuItem);
+        trayMenu.Items.Add(clearMenuItem); trayMenu.Items.Add(minimizeToTrayItem); trayMenu.Items.Add(new ToolStripSeparator()); trayMenu.Items.Add(exitItem);
 
         Icon trayIcon = SystemIcons.Application;
-
-        try
-        {
-            string? exePath = Environment.ProcessPath;
-
-            if (!string.IsNullOrEmpty(exePath))
-            {
-                trayIcon = Icon.ExtractAssociatedIcon(exePath) ?? SystemIcons.Application;
-            }
-        }
-        catch
-        {
-            trayIcon = SystemIcons.Application;
-        }
-
-        _notifyIcon = new NotifyIcon
-        {
-            Icon = trayIcon,
-            Text = "Clipboard Queue: 0 items",
-            Visible = true,
-            ContextMenuStrip = trayMenu
-        };
-
+        try { string? exe = Environment.ProcessPath; if (!string.IsNullOrEmpty(exe)) trayIcon = Icon.ExtractAssociatedIcon(exe) ?? SystemIcons.Application; } catch { }
+        _notifyIcon = new NotifyIcon { Icon = trayIcon, Text = "Clipboard Queue: 0 items", Visible = true, ContextMenuStrip = trayMenu };
         _notifyIcon.DoubleClick += (_, _) => ShowQueueWindow();
     }
 
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-
         _uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
-
         _cursorCounter = new CursorCounter();
-
+        RebuildFilterRegex();
         NativeMethods.AddClipboardFormatListener(Handle);
-
         _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
 
-        _clipboardTimer = new System.Windows.Forms.Timer
-        {
-            Interval = 400
-        };
+        _clipboardTimer = new System.Windows.Forms.Timer { Interval = 400 }; _clipboardTimer.Tick += (_, _) => OnClipboardUpdate(); _clipboardTimer.Start();
+        _syncTimer = new System.Windows.Forms.Timer { Interval = SyncDelayMs }; _syncTimer.Tick += (_, _) => { _syncTimer.Stop(); SyncClipboardOwnership(); };
+        _focusTimer = new System.Windows.Forms.Timer { Interval = FocusPollMs }; _focusTimer.Tick += (_, _) => OnFocusPoll(); _focusTimer.Start();
+        _renderConsumeTimer = new System.Windows.Forms.Timer { Interval = 250 }; _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
+        _menuConfirmTimer = new System.Windows.Forms.Timer { Interval = 400 }; _menuConfirmTimer.Tick += (_, _) => OnMenuConfirmTick();
 
-        _clipboardTimer.Tick += (_, _) => OnClipboardUpdate();
-        _clipboardTimer.Start();
-
-        _syncTimer = new System.Windows.Forms.Timer
-        {
-            Interval = SyncDelayMs
-        };
-
-        _syncTimer.Tick += (_, _) =>
-        {
-            _syncTimer.Stop();
-            SyncClipboardOwnership();
-        };
-
-        _focusTimer = new System.Windows.Forms.Timer
-        {
-            Interval = FocusPollMs
-        };
-
-        _focusTimer.Tick += (_, _) => OnFocusPoll();
-        _focusTimer.Start();
-
-        _renderConsumeTimer = new System.Windows.Forms.Timer
-        {
-            Interval = 250
-        };
-
-        _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
-
-        _menuConfirmTimer = new System.Windows.Forms.Timer
-        {
-            Interval = 400
-        };
-
-        _menuConfirmTimer.Tick += (_, _) => OnMenuConfirmTick();
-
-        try
-        {
-            _keyboardHook = new KeyboardHook
-            {
-                ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0,
-                ShouldHandleCtrlAltV = () => GetCount() > 0,
-                CtrlVPressed = () => PostToUi(PasteNext),
-                CtrlAltVPressed = () => PostToUi(PasteAll)
-            };
-        }
-        catch
-        {
-            _notifyIcon.ShowBalloonTip(
-                3000,
-                "Clipboard Queue",
-                "Could not install the global keyboard hook. Tray buttons still work.",
-                ToolTipIcon.Warning);
-        }
-
-        try
-        {
-            _mouseHook = new MouseHook
-            {
-                LeftClickAfterRightClick = (seq, firstAfterRight) =>
-                    PostToUi(() => OnLeftClick(seq, firstAfterRight))
-            };
-        }
-        catch
-        {
-        }
+        try { _keyboardHook = new KeyboardHook { ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0, ShouldHandleCtrlAltV = () => GetCount() > 0, CtrlVPressed = () => PostToUi(PasteNext), CtrlAltVPressed = () => PostToUi(PasteAll) }; } catch { }
+        try { _mouseHook = new MouseHook { LeftClickAfterRightClick = (seq, first) => PostToUi(() => OnLeftClick(seq, first)) }; } catch { }
 
         OnFocusPoll();
-
-        if (_startHidden)
-            HideQueueWindow();
-        else
-            ShowQueueWindow();
-
+        if (_startHidden) HideQueueWindow(); else ShowQueueWindow();
         RefreshUi();
     }
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == NativeMethods.WM_CLIPBOARDUPDATE)
-        {
-            OnClipboardUpdate();
-            base.WndProc(ref m);
-            return;
-        }
-
-        if (m.Msg == NativeClipboard.WM_DESTROYCLIPBOARD)
-        {
-            _armed = false;
-            base.WndProc(ref m);
-            return;
-        }
-
-        if (m.Msg == NativeClipboard.WM_RENDERFORMAT)
-        {
-            HandleRenderFormat((uint)m.WParam.ToInt64());
-            return;
-        }
-
-        if (m.Msg == NativeClipboard.WM_RENDERALLFORMATS)
-        {
-            HandleRenderFormat(NativeClipboard.CF_UNICODETEXT);
-            HandleRenderFormat(NativeClipboard.CfHtml);
-            return;
-        }
-
+        if (m.Msg == NativeMethods.WM_CLIPBOARDUPDATE) { OnClipboardUpdate(); base.WndProc(ref m); return; }
+        if (m.Msg == NativeClipboard.WM_DESTROYCLIPBOARD) { _armed = false; base.WndProc(ref m); return; }
+        if (m.Msg == NativeClipboard.WM_RENDERFORMAT) { HandleRenderFormat((uint)m.WParam.ToInt64()); return; }
+        if (m.Msg == NativeClipboard.WM_RENDERALLFORMATS) { HandleRenderFormat(NativeClipboard.CF_UNICODETEXT); HandleRenderFormat(NativeClipboard.CfHtml); return; }
         base.WndProc(ref m);
     }
 
-    protected override void OnResize(EventArgs e)
-    {
-        base.OnResize(e);
+    protected override void OnResize(EventArgs e) { base.OnResize(e); if (WindowState == FormWindowState.Minimized) HideQueueWindow(); }
+    protected override void OnFormClosing(FormClosingEventArgs e) { if (!_exitRequested && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideQueueWindow(); base.OnFormClosing(e); return; } Cleanup(); base.OnFormClosing(e); }
 
-        if (WindowState == FormWindowState.Minimized)
-        {
-            HideQueueWindow();
-        }
+    private void OpenFilterDialog()
+    {
+        using var d = new FilterWordsDialog(_settings.FilterWords);
+        if (d.ShowDialog(this) == DialogResult.OK) { _settings.FilterWords = d.Words.ToList(); SettingsManager.Save(_settings); RebuildFilterRegex(); ScheduleSync(); }
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    private void RebuildFilterRegex()
     {
-        if (!_exitRequested && e.CloseReason == CloseReason.UserClosing)
-        {
-            e.Cancel = true;
-            HideQueueWindow();
-            base.OnFormClosing(e);
-            return;
-        }
+        if (!_settings.EnableFilter) { _filterPattern = null; return; }
+        var entries = (_settings.FilterWords ?? new List<string>()).Select(w => w.TrimEnd()).Where(w => w.Length > 0).Select(Regex.Escape).ToList();
+        if (entries.Count == 0) { _filterPattern = null; return; }
+        _filterPattern = @"(?:" + string.Join("|", entries) + @")[ \t]*";
+    }
 
-        Cleanup();
-        base.OnFormClosing(e);
+    private string ApplyFilter(string text) => (_filterPattern == null || !_settings.EnableFilter) ? text : Regex.Replace(text, _filterPattern, string.Empty);
+
+    private string ApplyFilterHtml(string html)
+    {
+        if (!_settings.EnableFilter || _filterPattern == null || string.IsNullOrEmpty(html)) return html;
+        var entries = (_settings.FilterWords ?? new List<string>()).Select(w => w.TrimEnd()).Where(w => w.Length > 0).Select(Regex.Escape).ToList();
+        if (entries.Count == 0) return html;
+        string inner = string.Join("|", entries);
+        var wordRe = new Regex(@"(?:" + inner + @")[ \t]*", RegexOptions.IgnoreCase);
+        var fullRe = new Regex(@"^\s*(?:" + inner + @")\s*$", RegexOptions.IgnoreCase);
+        var tokens = Regex.Split(html, @"(<[^>]*>)");
+        int n = tokens.Length;
+        var work = new string[n]; var filtered = new string[n]; var isTag = new bool[n]; var removed = new bool[n]; var trimLeading = new bool[n];
+        var stack = new Stack<int>();
+        for (int i = 0; i < n; i++)
+        {
+            string t = tokens[i];
+            if (string.IsNullOrEmpty(t)) { removed[i] = true; continue; }
+            if (t[0] == '<')
+            {
+                isTag[i] = true;
+                bool isClose = t.Length > 1 && t[1] == '/';
+                bool selfClose = t.EndsWith("/>");
+                if (!isClose && !selfClose) stack.Push(i);
+                else if (isClose && stack.Count > 0)
+                {
+                    int open = stack.Pop();
+                    var sb = new StringBuilder(); bool pure = true;
+                    for (int k = open + 1; k < i; k++) { if (isTag[k]) { pure = false; break; } if (removed[k]) continue; if (work[k] == null) { pure = false; break; } sb.Append(work[k]); }
+                    if (pure && fullRe.IsMatch(sb.ToString()))
+                    {
+                        removed[open] = true; removed[i] = true;
+                        for (int k = open + 1; k < i; k++) removed[k] = true;
+                        for (int k = i + 1; k < n; k++) { string nt = tokens[k]; if (string.IsNullOrEmpty(nt)) continue; if (nt[0] == '<') continue; trimLeading[k] = true; break; }
+                    }
+                }
+            }
+            else
+            {
+                string w = t;
+                if (trimLeading[i] && (w[0] == ' ' || w[0] == '\t')) w = w.Substring(1);
+                work[i] = w;
+            }
+        }
+        for (int i = 0; i < n; i++) if (!isTag[i] && !removed[i] && work[i] != null) filtered[i] = wordRe.Replace(work[i], "");
+        var result = new StringBuilder();
+        for (int i = 0; i < n; i++) { if (removed[i]) continue; result.Append(isTag[i] ? tokens[i] : filtered[i]); }
+        string s = result.ToString();
+        for (int pass = 0; pass < 6; pass++) { string before = s; s = Regex.Replace(s, @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>\s*</\1>", "", RegexOptions.IgnoreCase); if (before == s) break; }
+        return s;
     }
 
     private void OnFocusPoll()
     {
         string name = GetForegroundProcessName();
-
-        if (name == _lastFgName)
-            return;
-
+        if (name == _lastFgName) return;
         _lastFgName = name;
-
-        bool real = _settings.RealDataApps != null &&
-                    _settings.RealDataApps.Any(n =>
-                        string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
-
-        if (real != _realMode || !_armed)
-        {
-            _realMode = real;
-            Diag($"MODE {(real ? "real" : "delayed")} app={name}");
-            SyncClipboardOwnership();
-        }
+        bool real = _settings.RealDataApps != null && _settings.RealDataApps.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+        if (real != _realMode || !_armed) { _realMode = real; Diag($"MODE {(real ? "real" : "delayed")} app={name}"); SyncClipboardOwnership(); }
     }
 
     private static string GetForegroundProcessName()
     {
-        try
-        {
-            IntPtr fg = NativeMethods.GetForegroundWindow();
-
-            if (fg == IntPtr.Zero)
-                return string.Empty;
-
-            NativeMethods.GetWindowThreadProcessId(fg, out uint pid);
-
-            return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
-        }
-        catch
-        {
-            return string.Empty;
-        }
+        try { IntPtr fg = NativeMethods.GetForegroundWindow(); if (fg == IntPtr.Zero) return string.Empty; NativeMethods.GetWindowThreadProcessId(fg, out uint pid); return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; }
+        catch { return string.Empty; }
     }
 
-    private void SetLogging(bool value)
-    {
-        if (_settings.Diagnostics == value)
-            return;
+    private void SetLogging(bool v) { if (_settings.Diagnostics == v) return; _settings.Diagnostics = v; SettingsManager.Save(_settings); if (v) Diag("LOGGING ON"); }
+    private void SetEnableFilter(bool v) { if (_settings.EnableFilter == v) return; _settings.EnableFilter = v; SettingsManager.Save(_settings); RebuildFilterRegex(); ScheduleSync(); }
+    private void SetStripHyperlinks(bool v) { if (_settings.StripHyperlinks == v) return; _settings.StripHyperlinks = v; SettingsManager.Save(_settings); ScheduleSync(); }
+    private void SetStripBulletPoints(bool v) { if (_settings.StripBulletPoints == v) return; _settings.StripBulletPoints = v; SettingsManager.Save(_settings); ScheduleSync(); }
 
-        _settings.Diagnostics = value;
-        SettingsManager.Save(_settings);
-
-        if (value)
-            Diag("LOGGING ON");
-    }
-
-    private void SetStripHyperlinks(bool value)
-    {
-        if (_settings.StripHyperlinks == value)
-            return;
-
-        _settings.StripHyperlinks = value;
-        SettingsManager.Save(_settings);
-    }
-
-    private void SetStripBulletPoints(bool value)
-    {
-        if (_settings.StripBulletPoints == value)
-            return;
-
-        _settings.StripBulletPoints = value;
-        SettingsManager.Save(_settings);
-    }
-
-    private void Diag(string message)
-    {
-        if (!_settings.Diagnostics)
-            return;
-
-        try
-        {
-            string path = Path.Combine(AppContext.BaseDirectory, "diagnostics.log");
-
-            var info = new FileInfo(path);
-
-            if (info.Exists && info.Length > 1_000_000)
-                File.Delete(path);
-
-            File.AppendAllText(path, $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}");
-        }
-        catch
-        {
-        }
-    }
-
-    private void ScheduleSync()
-    {
-        _syncTimer?.Stop();
-        _syncTimer?.Start();
-    }
-
+    private void Diag(string m) { if (!_settings.Diagnostics) return; try { string p = Path.Combine(AppContext.BaseDirectory, "diagnostics.log"); var fi = new FileInfo(p); if (fi.Exists && fi.Length > 1_000_000) File.Delete(p); File.AppendAllText(p, $"[{DateTime.Now:HH:mm:ss.fff}] {m}{Environment.NewLine}"); } catch { } }
+    private void ScheduleSync() { _syncTimer?.Stop(); _syncTimer?.Start(); }
     private bool ClipboardProtected => DateTime.UtcNow < _protectClipboardUntil;
+    private void ProtectClipboard() { _protectClipboardUntil = DateTime.UtcNow.AddMilliseconds(ClipboardProtectMs); }
 
-    private void ProtectClipboard()
-    {
-        _protectClipboardUntil = DateTime.UtcNow.AddMilliseconds(ClipboardProtectMs);
-    }
-
-    // ------------------------------------------------------------------
-    // Mouse-paste consumption for real-mode apps (Anki).
-    // ------------------------------------------------------------------
-
-    private void OnLeftClick(uint clickSeq, bool firstAfterRight)
-    {
-        if (GetCount() == 0 || !_realMode)
-            return;
-
-        if (firstAfterRight &&
-            (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds)
-        {
-            StartConfirm(clickSeq, "CUSTOMSELECT");
-        }
-    }
-
-    private void StartConfirm(uint clickSeq, string tag)
-    {
-        _menuConfirmSeq = clickSeq;
-        _confirmConsumedCount = _consumedCount;
-        _confirmStage = 0;
-        _menuConfirmTimer?.Stop();
-        _menuConfirmTimer?.Start();
-
-        Diag($"{tag} seq={clickSeq}");
-    }
-
+    private void OnLeftClick(uint seq, bool first) { if (GetCount() == 0 || !_realMode) return; if (first && (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds) StartConfirm(seq, "CUSTOMSELECT"); }
+    private void StartConfirm(uint seq, string tag) { _menuConfirmSeq = seq; _confirmConsumedCount = _consumedCount; _confirmStage = 0; _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Start(); Diag($"{tag} seq={seq}"); }
     private void OnMenuConfirmTick()
     {
-        uint seqNow = NativeMethods.GetClipboardSequenceNumber();
-
-        if (seqNow != _menuConfirmSeq)
-        {
-            Diag("CONFIRM cancel: clipboard changed");
-            _menuConfirmTimer?.Stop();
-            return;
-        }
-
-        if (_consumedCount != _confirmConsumedCount)
-        {
-            Diag("CONFIRM cancel: already consumed");
-            _menuConfirmTimer?.Stop();
-            return;
-        }
-
-        if (_confirmStage == 0)
-        {
-            _confirmStage = 1;
-            _menuConfirmTimer?.Stop();
-            _menuConfirmTimer?.Start();
-            Diag("CONFIRM stage1");
-            return;
-        }
-
-        string? headText;
-
-        lock (_sync)
-        {
-            headText = _items.Count > 0 ? _items.Peek().Text : null;
-        }
-
-        string? clipText = null;
-
-        try
-        {
-            if (Clipboard.ContainsText())
-                clipText = Clipboard.GetText();
-        }
-        catch
-        {
-        }
-
-        if (headText == null || clipText == null || clipText != headText)
-        {
-            Diag("CONFIRM cancel: content mismatch");
-            _menuConfirmTimer?.Stop();
-            return;
-        }
-
-        Diag("CONFIRM consume");
-        _menuConfirmTimer?.Stop();
-        ConsumeHead();
+        uint now = NativeMethods.GetClipboardSequenceNumber();
+        if (now != _menuConfirmSeq) { _menuConfirmTimer?.Stop(); return; }
+        if (_consumedCount != _confirmConsumedCount) { _menuConfirmTimer?.Stop(); return; }
+        if (_confirmStage == 0) { _confirmStage = 1; _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Start(); return; }
+        string? head; lock (_sync) { head = _items.Count > 0 ? ApplyFilter(_items.Peek().Text) : null; }
+        string? clip = null; try { if (Clipboard.ContainsText()) clip = Clipboard.GetText(); } catch { }
+        if (head == null || clip == null || clip != head) { _menuConfirmTimer?.Stop(); return; }
+        _menuConfirmTimer?.Stop(); ConsumeHead();
     }
-
-    private void ConsumeHead()
-    {
-        lock (_sync)
-        {
-            if (_items.Count > 0)
-            {
-                _items.Dequeue();
-                _consumedCount++;
-                Diag($"CONSUME confirm count={_items.Count}");
-            }
-        }
-
-        RefreshUi();
-        ScheduleSync();
-    }
-
-    // ------------------------------------------------------------------
-    // Delayed-render consumption: mouse pastes in Win32 apps (Notepad etc.).
-    // ------------------------------------------------------------------
+    private void ConsumeHead() { lock (_sync) { if (_items.Count > 0) { _items.Dequeue(); _consumedCount++; Diag($"CONSUME confirm count={_items.Count}"); } } RefreshUi(); ScheduleSync(); }
 
     private void HandleRenderFormat(uint format)
     {
         try
         {
-            ClipItem? item;
-
-            lock (_sync)
-            {
-                item = _renderedItem ?? (_items.Count > 0 ? _items.Peek() : null);
-            }
-
-            if (item == null)
-                return;
-
+            ClipItem? item; lock (_sync) { item = _renderedItem ?? (_items.Count > 0 ? _items.Peek() : null); }
+            if (item == null) return;
             _renderedItem = item;
-
-            bool knownFormat =
-                format == NativeClipboard.CF_UNICODETEXT ||
-                format == NativeClipboard.CfHtml;
-
-            if (format == NativeClipboard.CF_UNICODETEXT)
-            {
-                NativeClipboard.ProvideData(
-                    format,
-                    Encoding.Unicode.GetBytes(item.Text + "\0"));
-            }
-            else if (format == NativeClipboard.CfHtml)
-            {
-                NativeClipboard.ProvideData(
-                    format,
-                    Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
-            }
-            else
-            {
-                return;
-            }
-
-            bool pasteRead =
-                knownFormat &&
-                InputActivity.LastGesture > _armedAt &&
-                (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs &&
-                DateTime.UtcNow >= _consumeCooldownUntil;
-
-            Diag($"RENDER fmt={format} pasteRead={pasteRead} " +
-                 $"gestureAgeMs={(int)(DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds}");
-
-            if (pasteRead)
-            {
-                _renderConsumeTimer?.Stop();
-                _renderConsumeTimer?.Start();
-            }
-            else
-            {
-                if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600)
-                {
-                    PostToUi(ScheduleSync);
-                }
-                else
-                {
-                    _armed = false;
-                    Diag("POISON");
-                }
-            }
+            bool known = format == NativeClipboard.CF_UNICODETEXT || format == NativeClipboard.CfHtml;
+            if (format == NativeClipboard.CF_UNICODETEXT) NativeClipboard.ProvideData(format, Encoding.Unicode.GetBytes(ApplyFilter(item.Text) + "\0"));
+            else if (format == NativeClipboard.CfHtml) NativeClipboard.ProvideData(format, Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
+            else return;
+            bool pasteRead = known && InputActivity.LastGesture > _armedAt && (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs && DateTime.UtcNow >= _consumeCooldownUntil;
+            if (pasteRead) { _renderConsumeTimer?.Stop(); _renderConsumeTimer?.Start(); }
+            else { if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600) PostToUi(ScheduleSync); else { _armed = false; Diag("POISON"); } }
         }
-        catch
-        {
-        }
+        catch { }
     }
 
     private void ConsumeRenderedItem()
     {
         _renderConsumeTimer?.Stop();
-
-        ClipItem? rendered = _renderedItem;
-
-        if (rendered == null)
-            return;
-
-        _renderedItem = null;
-        _consumeCooldownUntil = DateTime.UtcNow.AddMilliseconds(ConsumeCooldownMs);
-
-        lock (_sync)
-        {
-            if (_items.Count > 0 && ReferenceEquals(_items.Peek(), rendered))
-            {
-                _items.Dequeue();
-                _consumedCount++;
-                Diag($"CONSUME render count={_items.Count}");
-            }
-        }
-
-        RefreshUi();
-        ScheduleSync();
+        var r = _renderedItem; if (r == null) return;
+        _renderedItem = null; _consumeCooldownUntil = DateTime.UtcNow.AddMilliseconds(ConsumeCooldownMs);
+        lock (_sync) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), r)) { _items.Dequeue(); _consumedCount++; Diag($"CONSUME render count={_items.Count}"); } }
+        RefreshUi(); ScheduleSync();
     }
-
-    // ------------------------------------------------------------------
-    // Clipboard ownership.
-    // ------------------------------------------------------------------
 
     private void SyncClipboardOwnership()
     {
-        if (ClipboardProtected)
-            return;
-
-        if (!_settings.InterceptAllPastes || GetCount() == 0)
-        {
-            _armed = false;
-            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-            return;
-        }
-
-        ClipItem? head;
-
-        lock (_sync)
-        {
-            head = _items.Peek();
-        }
-
-        if (head == null)
-            return;
-
-        bool ok;
-
-        if (_realMode)
-        {
-            string htmlData = HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head));
-            ok = NativeClipboard.TrySetHtmlAndText(head.Text, htmlData);
-        }
-        else
-        {
-            ok = NativeClipboard.ArmDelayed(Handle);
-        }
-
-        if (ok)
-        {
-            _armed = true;
-            _armedAt = DateTime.UtcNow;
-            _lastArmTime = DateTime.UtcNow;
-            _renderedItem = null;
-
-            _lastProgrammaticClipboardText = head.Text;
-            _lastProgrammaticClipboardTime = DateTime.UtcNow;
-            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-
-            Diag($"ARM {(_realMode ? "real" : "delayed")}");
-        }
+        if (ClipboardProtected) return;
+        if (!_settings.InterceptAllPastes || GetCount() == 0) { _armed = false; _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber(); return; }
+        ClipItem? head; lock (_sync) { head = _items.Peek(); } if (head == null) return;
+        string headText = ApplyFilter(head.Text);
+        bool ok = _realMode ? NativeClipboard.TrySetHtmlAndText(headText, HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head))) : NativeClipboard.ArmDelayed(Handle);
+        if (ok) { _armed = true; _armedAt = DateTime.UtcNow; _lastArmTime = DateTime.UtcNow; _renderedItem = null; _lastProgrammaticClipboardText = headText; _lastProgrammaticClipboardTime = DateTime.UtcNow; _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber(); Diag($"ARM {(_realMode ? "real" : "delayed")}"); }
     }
-
-    // ------------------------------------------------------------------
-    // Text / HTML preparation with user-configurable cleanup.
-    // ------------------------------------------------------------------
 
     private string CleanText(string text)
     {
-        if (!_settings.StripBulletPoints)
-            return text;
-
-        // Remove leading bullet markers from each line.
-        return Regex.Replace(
-            text,
-            @"(?m)^[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+",
-            "");
+        if (_settings.StripBulletPoints) text = Regex.Replace(text, @"(?m)^[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "");
+        return ApplyFilter(text);
     }
 
-
-    
+    // Gentle HTML cleanup: keep the source's block structure (natural spacing),
+    // only ensure EMPTY blocks contain a <br> so blank lines survive.
     private string PrepareRichHtml(string html)
     {
         string result = html;
 
         if (_settings.StripHyperlinks)
-        {
-            for (int p = 0; p < 6; p++)
-            {
-                string b = result;
-                result = Regex.Replace(result, @"<a\b[^>]*>(.*?)</a>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-                if (b == result) break;
-            }
-        }
+            for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<a\b[^>]*>(.*?)</a>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
 
-        // Italics are always removed (inner text kept).
-        for (int p = 0; p < 6; p++)
-        {
-            string b = result;
-            result = Regex.Replace(result, @"<(em|i)\b[^>]*>(.*?)</\1>", "$2", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            result = Regex.Replace(result, @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (b == result) break;
-        }
+        for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<(em|i)\b[^>]*>(.*?)</\1>", "$2", RegexOptions.IgnoreCase | RegexOptions.Singleline); result = Regex.Replace(result, @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
 
         if (_settings.StripBulletPoints)
         {
@@ -871,570 +373,135 @@ public sealed class MainForm : Form
             result = Regex.Replace(result, @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "", RegexOptions.IgnoreCase);
         }
 
-        // Keep the source's block structure so line spacing stays natural, and
-        // only make sure EMPTY blocks contain a <br> so editors like Anki do
-        // not collapse them (which would lose explicit blank lines).
-        for (int p = 0; p < 6; p++)
-        {
-            string b = result;
-            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)(\b[^>]*)>\s*</\1>", "<$1$2><br></$1>", RegexOptions.IgnoreCase);
-            if (b == result) break;
-        }
+        for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<(div|p|h[1-6]|li)(\b[^>]*)>\s*</\1>", "<$1$2><br></$1>", RegexOptions.IgnoreCase); if (b == result) break; }
 
-        // v1.37 filter words still applied last.
         return ApplyFilterHtml(result);
     }
 
-
     private string BuildHtmlData(ClipItem item)
     {
-        string html;
-
-        if (!string.IsNullOrWhiteSpace(item.Html))
-        {
-            html = PrepareRichHtml(item.Html);
-        }
-        else if (_settings.RenderMarkdownForPlainText)
-        {
-            html = Markdown.ToHtml(item.Text, MarkdownPipeline);
-        }
-        else
-        {
-            html = HtmlClipboardHelper.PlainTextToHtml(item.Text);
-        }
-
-        return html;
+        if (!string.IsNullOrWhiteSpace(item.Html)) return PrepareRichHtml(item.Html);
+        if (_settings.RenderMarkdownForPlainText) return Markdown.ToHtml(item.Text, MarkdownPipeline);
+        return HtmlClipboardHelper.PlainTextToHtml(item.Text);
     }
 
-    private static long SizeOf(ClipItem item)
-    {
-        return item.Text.Length + (item.Html?.Length ?? 0);
-    }
+    private static long SizeOf(ClipItem item) => item.Text.Length + (item.Html?.Length ?? 0);
 
     private void OnClipboardUpdate()
     {
         try
         {
-            uint current = NativeMethods.GetClipboardSequenceNumber();
-
-            if (_pauseMonitoring)
-            {
-                _lastClipboardSequence = current;
-                return;
-            }
-
-            if (current == _lastClipboardSequence)
-                return;
-
-            if (!Clipboard.ContainsText())
-                return;
-
-            if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList())
-            {
-                _armed = false;
-                _lastClipboardSequence = current;
-                return;
-            }
-
-            string text = Clipboard.GetText();
-
-            string? html = null;
-
-            try
-            {
-                if (Clipboard.ContainsText(TextDataFormat.Html))
-                {
-                    string rawHtml = Clipboard.GetText(TextDataFormat.Html);
-                    html = HtmlClipboardHelper.ExtractFragment(rawHtml);
-
-                    if (html != null)
-                    {
-                        html = HtmlClipboardHelper.NormalizeLineBreaks(html);
-
-                        if (html.Length > MaxHtmlLength)
-                            html = null;
-                    }
-                }
-            }
-            catch
-            {
-                html = null;
-            }
-
-            _lastClipboardSequence = current;
-
+            uint cur = NativeMethods.GetClipboardSequenceNumber();
+            if (_pauseMonitoring) { _lastClipboardSequence = cur; return; }
+            if (cur == _lastClipboardSequence) return;
+            if (!Clipboard.ContainsText()) return;
+            if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList()) { _armed = false; _lastClipboardSequence = cur; return; }
+            string text = Clipboard.GetText(); string? html = null;
+            try { if (Clipboard.ContainsText(TextDataFormat.Html)) { string raw = Clipboard.GetText(TextDataFormat.Html); html = HtmlClipboardHelper.ExtractFragment(raw); if (html != null) { html = HtmlClipboardHelper.NormalizeLineBreaks(html); if (html.Length > MaxHtmlLength) html = null; } } } catch { html = null; }
+            _lastClipboardSequence = cur;
             AddClipboardItem(text, html);
         }
-        catch
-        {
-        }
+        catch { }
     }
 
     private void AddClipboardItem(string text, string? html)
     {
-        if (_pauseMonitoring)
-            return;
-
+        if (_pauseMonitoring) return;
         text = CleanText(text);
-
-        if (string.IsNullOrWhiteSpace(text))
-            return;
-
-        if (text.Length > MaxItemLength)
-            return;
-
-        if (DateTime.UtcNow - _lastProgrammaticClipboardTime < TimeSpan.FromSeconds(2) &&
-            text == _lastProgrammaticClipboardText)
-        {
-            return;
-        }
-
-        if (text == _lastStoredText &&
-            html == _lastStoredHtml &&
-            (DateTime.UtcNow - _lastStoredTime).TotalSeconds < RepeatCopyWindowSeconds)
-        {
-            _lastStoredTime = DateTime.UtcNow;
-            return;
-        }
-
-        lock (_sync)
-        {
-            _items.Enqueue(new ClipItem(text, html));
-            Diag($"STORE count={_items.Count}");
-        }
-
-        _lastStoredText = text;
-        _lastStoredHtml = html;
-        _lastStoredTime = DateTime.UtcNow;
-
-        RefreshUi();
-        ScheduleSync();
+        if (string.IsNullOrWhiteSpace(text)) return;
+        if (text.Length > MaxItemLength) return;
+        if (DateTime.UtcNow - _lastProgrammaticClipboardTime < TimeSpan.FromSeconds(2) && text == _lastProgrammaticClipboardText) return;
+        if (text == _lastStoredText && html == _lastStoredHtml && (DateTime.UtcNow - _lastStoredTime).TotalSeconds < RepeatCopyWindowSeconds) { _lastStoredTime = DateTime.UtcNow; return; }
+        lock (_sync) { _items.Enqueue(new ClipItem(text, html)); Diag($"STORE count={_items.Count}"); }
+        _lastStoredText = text; _lastStoredHtml = html; _lastStoredTime = DateTime.UtcNow;
+        RefreshUi(); ScheduleSync();
     }
 
-    private void PostToUi(Action action)
-    {
-        try
-        {
-            _uiContext?.Post(_ => action(), null);
-        }
-        catch
-        {
-        }
-    }
-
-    private int GetCount()
-    {
-        lock (_sync)
-        {
-            return _items.Count;
-        }
-    }
-
-    private void SetPauseMonitoring(bool value)
-    {
-        if (_updatingPause)
-            return;
-
-        _updatingPause = true;
-
-        _pauseMonitoring = value;
-        _pauseCheckBox.Checked = value;
-        _pauseMenuItem.Checked = value;
-
-        _updatingPause = false;
-    }
-
-    private void SetStartWithWindows(bool value)
-    {
-        if (_updatingStartup)
-            return;
-
-        _updatingStartup = true;
-
-        StartupManager.SetEnabled(value);
-
-        bool enabled = StartupManager.IsEnabled();
-
-        _startupCheckBox.Checked = enabled;
-        _startupMenuItem.Checked = enabled;
-
-        _updatingStartup = false;
-    }
-
-    private void ShowQueueWindow()
-    {
-        Show();
-        ShowInTaskbar = true;
-        WindowState = FormWindowState.Normal;
-        Activate();
-
-        _suppressCounter = true;
-        RefreshUi();
-    }
-
-    private void HideQueueWindow()
-    {
-        Hide();
-        ShowInTaskbar = false;
-    }
+    private void PostToUi(Action a) { try { _uiContext?.Post(_ => a(), null); } catch { } }
+    private int GetCount() { lock (_sync) return _items.Count; }
+    private void SetPauseMonitoring(bool v) { if (_updatingPause) return; _updatingPause = true; _pauseMonitoring = v; _pauseCheckBox.Checked = v; _pauseMenuItem.Checked = v; _updatingPause = false; }
+    private void SetStartWithWindows(bool v) { if (_updatingStartup) return; _updatingStartup = true; StartupManager.SetEnabled(v); bool en = StartupManager.IsEnabled(); _startupCheckBox.Checked = en; _startupMenuItem.Checked = en; _updatingStartup = false; }
+    private void ShowQueueWindow() { Show(); ShowInTaskbar = true; WindowState = FormWindowState.Normal; Activate(); _suppressCounter = true; RefreshUi(); }
+    private void HideQueueWindow() { Hide(); ShowInTaskbar = false; }
 
     private void RefreshUi()
     {
         ClipItem[] items;
-
-        lock (_sync)
-        {
-            while (_items.Count > MaxItems)
-            {
-                _items.Dequeue();
-            }
-
-            long total = 0;
-
-            foreach (ClipItem it in _items)
-            {
-                total += SizeOf(it);
-            }
-
-            while (total > MaxTotalChars && _items.Count > 0)
-            {
-                ClipItem old = _items.Dequeue();
-                total -= SizeOf(old);
-            }
-
-            items = _items.ToArray();
-        }
-
-        if (Visible)
-            RebuildList(items);
-
+        lock (_sync) { while (_items.Count > MaxItems) _items.Dequeue(); long tot = 0; foreach (var it in _items) tot += SizeOf(it); while (tot > MaxTotalChars && _items.Count > 0) { var o = _items.Dequeue(); tot -= SizeOf(o); } items = _items.ToArray(); }
+        if (Visible) RebuildList(items);
         _countLabel.Text = $"{items.Length} item(s)";
-
-        string tooltip = $"Clipboard Queue: {items.Length} item(s)";
-
-        if (tooltip.Length > 127)
-            tooltip = tooltip[..127];
-
-        _notifyIcon.Text = tooltip;
-
-        if (_suppressCounter)
-        {
-            _suppressCounter = false;
-        }
-        else
-        {
-            _cursorCounter?.ShowCount(items.Length, items.Length > _lastCount);
-        }
-
+        string tip = $"Clipboard Queue: {items.Length} item(s)"; if (tip.Length > 127) tip = tip[..127];
+        _notifyIcon.Text = tip;
+        if (_suppressCounter) _suppressCounter = false; else _cursorCounter?.ShowCount(items.Length, items.Length > _lastCount);
         _lastCount = items.Length;
     }
 
-    private void RebuildList(ClipItem[] items)
-    {
-        _listView.BeginUpdate();
-        _listView.Items.Clear();
-
-        foreach (ClipItem item in items)
-        {
-            _listView.Items.Add(new ListViewItem(MakePreview(item.Text)));
-        }
-
-        _listView.EndUpdate();
-    }
-
-    private static string MakePreview(string text)
-    {
-        string oneLine = text
-            .Replace("\r", string.Empty)
-            .Replace("\n", " ⏎ ");
-
-        if (oneLine.Length <= PreviewLength)
-            return oneLine;
-
-        return oneLine[..PreviewLength] + "…";
-    }
+    private void RebuildList(ClipItem[] items) { _listView.BeginUpdate(); _listView.Items.Clear(); foreach (var it in items) _listView.Items.Add(new ListViewItem(MakePreview(it.Text))); _listView.EndUpdate(); }
+    private string MakePreview(string t) { string s = ApplyFilter(t).Replace("\r", "").Replace("\n", " ⏎ "); return s.Length <= PreviewLength ? s : s[..PreviewLength] + "…"; }
 
     private void DeleteSelected()
     {
-        if (_listView.SelectedIndices.Count == 0)
-            return;
-
-        HashSet<int> selected = _listView.SelectedIndices.Cast<int>().ToHashSet();
-
-        lock (_sync)
-        {
-            ClipItem[] current = _items.ToArray();
-            _items.Clear();
-
-            for (int i = 0; i < current.Length; i++)
-            {
-                if (!selected.Contains(i))
-                {
-                    _items.Enqueue(current[i]);
-                }
-            }
-        }
-
-        RefreshUi();
-        ScheduleSync();
+        if (_listView.SelectedIndices.Count == 0) return;
+        var sel = _listView.SelectedIndices.Cast<int>().ToHashSet();
+        lock (_sync) { var cur = _items.ToArray(); _items.Clear(); for (int i = 0; i < cur.Length; i++) if (!sel.Contains(i)) _items.Enqueue(cur[i]); }
+        RefreshUi(); ScheduleSync();
     }
-
-    private void ClearAll()
-    {
-        lock (_sync)
-        {
-            _items.Clear();
-        }
-
-        RefreshUi();
-        ScheduleSync();
-    }
+    private void ClearAll() { lock (_sync) _items.Clear(); RefreshUi(); ScheduleSync(); }
 
     private async void PasteNext()
     {
-        if (_pasteBusy)
-            return;
-
-        _pasteBusy = true;
-
-        try
-        {
-            ClipItem? item;
-
-            lock (_sync)
-            {
-                item = _items.Count > 0 ? _items.Peek() : null;
-            }
-
-            if (item == null)
-                return;
-
-            await PasteRichAsync(item.Text, item.Html, false, () =>
-            {
-                lock (_sync)
-                {
-                    if (_items.Count > 0 && ReferenceEquals(_items.Peek(), item))
-                    {
-                        _items.Dequeue();
-                        _consumedCount++;
-                        Diag($"CONSUME key count={_items.Count}");
-                    }
-                }
-            });
-        }
-        finally
-        {
-            _pasteBusy = false;
-        }
+        if (_pasteBusy) return; _pasteBusy = true;
+        try { ClipItem? it; lock (_sync) it = _items.Count > 0 ? _items.Peek() : null; if (it == null) return; await PasteRichAsync(it.Text, it.Html, false, () => { lock (_sync) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), it)) { _items.Dequeue(); _consumedCount++; Diag($"CONSUME key count={_items.Count}"); } } }); }
+        finally { _pasteBusy = false; }
     }
 
     private async void PasteAll()
     {
-        if (_pasteBusy)
-            return;
-
-        _pasteBusy = true;
-
+        if (_pasteBusy) return; _pasteBusy = true;
         try
         {
-            ClipItem[] items;
-
-            lock (_sync)
-            {
-                if (_items.Count == 0)
-                    return;
-
-                items = _items.ToArray();
-            }
-
-            string separator = string.IsNullOrEmpty(_settings.PasteAllSeparator)
-                ? Environment.NewLine + Environment.NewLine
-                : _settings.PasteAllSeparator;
-
-            var combined = await Task.Run(() =>
-            {
-                var textBuilder = new StringBuilder();
-                var htmlBuilder = new StringBuilder();
-
-                for (int i = 0; i < items.Length; i++)
-                {
-                    ClipItem item = items[i];
-
-                    textBuilder.Append(item.Text);
-                    htmlBuilder.Append(BuildHtmlData(item));
-
-                    if (i < items.Length - 1)
-                    {
-                        textBuilder.Append(separator);
-                        htmlBuilder.Append("<br><br>");
-                    }
-                }
-
-                return (Text: textBuilder.ToString(), Html: htmlBuilder.ToString());
-            });
-
-            await PasteRichAsync(combined.Text, combined.Html, true, () =>
-            {
-                lock (_sync)
-                {
-                    for (int i = 0; i < items.Length; i++)
-                    {
-                        if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i]))
-                        {
-                            _items.Dequeue();
-                            _consumedCount++;
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-
-                    Diag($"CONSUME pasteall count={_items.Count}");
-                }
-            });
+            ClipItem[] items; lock (_sync) { if (_items.Count == 0) return; items = _items.ToArray(); }
+            string sep = string.IsNullOrEmpty(_settings.PasteAllSeparator) ? Environment.NewLine + Environment.NewLine : _settings.PasteAllSeparator;
+            var comb = await Task.Run(() => { var tb = new StringBuilder(); var hb = new StringBuilder(); for (int i = 0; i < items.Length; i++) { tb.Append(items[i].Text); hb.Append(BuildHtmlData(items[i])); if (i < items.Length - 1) { tb.Append(sep); hb.Append("<br><br>"); } } return (Text: tb.ToString(), Html: hb.ToString()); });
+            await PasteRichAsync(comb.Text, comb.Html, true, () => { lock (_sync) { for (int i = 0; i < items.Length; i++) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i])) { _items.Dequeue(); _consumedCount++; } else break; } Diag($"CONSUME pasteall count={_items.Count}"); } });
         }
-        finally
-        {
-            _pasteBusy = false;
-        }
+        finally { _pasteBusy = false; }
     }
 
     private async Task PasteRichAsync(string text, string? html, bool waitModifiers, Action? onSuccess)
     {
         try
         {
+            text = ApplyFilter(text);
             string htmlToUse;
-
-            if (!string.IsNullOrWhiteSpace(html))
-            {
-                htmlToUse = PrepareRichHtml(html);
-            }
-            else if (_settings.RenderMarkdownForPlainText)
-            {
-                string textCopy = text;
-                htmlToUse = await Task.Run(() => Markdown.ToHtml(textCopy, MarkdownPipeline));
-            }
-            else
-            {
-                string textCopy = text;
-                htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(textCopy));
-            }
-
-            string htmlClipboardData = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
-
-            bool clipboardSet = NativeClipboard.TrySetHtmlAndText(text, htmlClipboardData);
-
-            if (!clipboardSet)
-            {
-                var data = new DataObject();
-                data.SetData(DataFormats.UnicodeText, text);
-                data.SetData(DataFormats.Html, htmlClipboardData);
-                clipboardSet = await TrySetClipboardAsync(data);
-            }
-
-            if (!clipboardSet)
-                return;
-
+            if (!string.IsNullOrWhiteSpace(html)) htmlToUse = PrepareRichHtml(html);
+            else if (_settings.RenderMarkdownForPlainText) htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
+            else htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
+            string data = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
+            bool ok = NativeClipboard.TrySetHtmlAndText(text, data);
+            if (!ok) { var d = new DataObject(); d.SetData(DataFormats.UnicodeText, text); d.SetData(DataFormats.Html, data); ok = await TrySetClipboardAsync(d); }
+            if (!ok) return;
             ProtectClipboard();
-
-            _lastProgrammaticClipboardText = text;
-            _lastProgrammaticClipboardTime = DateTime.UtcNow;
-            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-
-            onSuccess?.Invoke();
-            RefreshUi();
-
+            _lastProgrammaticClipboardText = text; _lastProgrammaticClipboardTime = DateTime.UtcNow; _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+            onSuccess?.Invoke(); RefreshUi();
             await Task.Delay(50);
-
-            if (waitModifiers)
-                NativeMethods.WaitForModifierKeysRelease();
-
+            if (waitModifiers) NativeMethods.WaitForModifierKeysRelease();
             NativeMethods.SendCtrlV();
-
             ProtectClipboard();
-
-            _renderedItem = null;
-            ScheduleSync();
+            _renderedItem = null; ScheduleSync();
         }
-        catch
-        {
-        }
+        catch { }
     }
 
-    private static async Task<bool> TrySetClipboardAsync(IDataObject data, int retries = 5)
-    {
-        for (int i = 0; i < retries; i++)
-        {
-            try
-            {
-                Clipboard.SetDataObject(data, true);
-                return true;
-            }
-            catch
-            {
-                await Task.Delay(80);
-            }
-        }
-
-        return false;
-    }
-
-    private void ExitApplication()
-    {
-        _exitRequested = true;
-        Cleanup();
-        Application.Exit();
-    }
+    private static async Task<bool> TrySetClipboardAsync(IDataObject d, int retries = 5) { for (int i = 0; i < retries; i++) { try { Clipboard.SetDataObject(d, true); return true; } catch { await Task.Delay(80); } } return false; }
+    private void ExitApplication() { _exitRequested = true; Cleanup(); Application.Exit(); }
 
     private void Cleanup()
     {
-        if (_cleanedUp)
-            return;
-
-        _cleanedUp = true;
-
-        try
-        {
-            if (IsHandleCreated)
-                NativeMethods.RemoveClipboardFormatListener(Handle);
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            _clipboardTimer?.Stop();
-            _clipboardTimer?.Dispose();
-
-            _syncTimer?.Stop();
-            _syncTimer?.Dispose();
-
-            _focusTimer?.Stop();
-            _focusTimer?.Dispose();
-
-            _renderConsumeTimer?.Stop();
-            _renderConsumeTimer?.Dispose();
-
-            _menuConfirmTimer?.Stop();
-            _menuConfirmTimer?.Dispose();
-        }
-        catch
-        {
-        }
-
-        _keyboardHook?.Dispose();
-        _mouseHook?.Dispose();
-        _cursorCounter?.Dispose();
-
-        try
-        {
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
-        }
-        catch
-        {
-        }
+        if (_cleanedUp) return; _cleanedUp = true;
+        try { if (IsHandleCreated) NativeMethods.RemoveClipboardFormatListener(Handle); } catch { }
+        try { _clipboardTimer?.Stop(); _clipboardTimer?.Dispose(); _syncTimer?.Stop(); _syncTimer?.Dispose(); _focusTimer?.Stop(); _focusTimer?.Dispose(); _renderConsumeTimer?.Stop(); _renderConsumeTimer?.Dispose(); _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Dispose(); } catch { }
+        _keyboardHook?.Dispose(); _mouseHook?.Dispose(); _cursorCounter?.Dispose();
+        try { _notifyIcon.Visible = false; _notifyIcon.Dispose(); } catch { }
     }
 }
