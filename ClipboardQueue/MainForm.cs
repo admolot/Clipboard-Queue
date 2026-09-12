@@ -65,6 +65,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _enableFilterCheckBox;
     private readonly CheckBox _stripLinksCheckBox;
     private readonly CheckBox _stripBulletsCheckBox;
+    private readonly CheckBox _gapBlanksCheckBox;
     private readonly NotifyIcon _notifyIcon;
     private readonly ToolStripMenuItem _pauseMenuItem;
     private readonly ToolStripMenuItem _startupMenuItem;
@@ -117,7 +118,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.52";
+        Text = "Clipboard Queue 1.53";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -141,13 +142,14 @@ public sealed class MainForm : Form
         _enableFilterCheckBox = new CheckBox { Text = "Enable filter", AutoSize = true, Checked = _settings.EnableFilter }; _enableFilterCheckBox.CheckedChanged += (_, _) => SetEnableFilter(_enableFilterCheckBox.Checked);
         _stripLinksCheckBox = new CheckBox { Text = "Strip hyperlinks", AutoSize = true, Checked = _settings.StripHyperlinks }; _stripLinksCheckBox.CheckedChanged += (_, _) => SetStripHyperlinks(_stripLinksCheckBox.Checked);
         _stripBulletsCheckBox = new CheckBox { Text = "Strip bullet points", AutoSize = true, Checked = _settings.StripBulletPoints }; _stripBulletsCheckBox.CheckedChanged += (_, _) => SetStripBulletPoints(_stripBulletsCheckBox.Checked);
+        _gapBlanksCheckBox = new CheckBox { Text = "Blank line at paragraph gaps", AutoSize = true, Checked = _settings.ParagraphGapBlankLines }; _gapBlanksCheckBox.CheckedChanged += (_, _) => SetGapBlanks(_gapBlanksCheckBox.Checked);
         _countLabel = new Label { AutoSize = true, Text = "0 items", TextAlign = ContentAlignment.MiddleLeft };
 
         buttonPanel.Controls.Add(pasteNextButton); buttonPanel.Controls.Add(pasteAllButton); buttonPanel.Controls.Add(deleteSelectedButton);
         buttonPanel.Controls.Add(clearAllButton); buttonPanel.Controls.Add(minimizeToTrayButton); buttonPanel.Controls.Add(filterButton);
         buttonPanel.Controls.Add(_pauseCheckBox); buttonPanel.Controls.Add(_startupCheckBox); buttonPanel.Controls.Add(_loggingCheckBox);
         buttonPanel.Controls.Add(_enableFilterCheckBox); buttonPanel.Controls.Add(_stripLinksCheckBox); buttonPanel.Controls.Add(_stripBulletsCheckBox);
-        buttonPanel.Controls.Add(_countLabel);
+        buttonPanel.Controls.Add(_gapBlanksCheckBox); buttonPanel.Controls.Add(_countLabel);
 
         root.Controls.Add(_listView, 0, 0); root.Controls.Add(buttonPanel, 0, 1); Controls.Add(root);
 
@@ -290,6 +292,7 @@ public sealed class MainForm : Form
     private void SetEnableFilter(bool v) { if (_settings.EnableFilter == v) return; _settings.EnableFilter = v; SettingsManager.Save(_settings); RebuildFilterRegex(); ScheduleSync(); }
     private void SetStripHyperlinks(bool v) { if (_settings.StripHyperlinks == v) return; _settings.StripHyperlinks = v; SettingsManager.Save(_settings); ScheduleSync(); }
     private void SetStripBulletPoints(bool v) { if (_settings.StripBulletPoints == v) return; _settings.StripBulletPoints = v; SettingsManager.Save(_settings); ScheduleSync(); }
+    private void SetGapBlanks(bool v) { if (_settings.ParagraphGapBlankLines == v) return; _settings.ParagraphGapBlankLines = v; SettingsManager.Save(_settings); ScheduleSync(); }
 
     private void Diag(string m) { if (!_settings.Diagnostics) return; try { string p = Path.Combine(AppContext.BaseDirectory, "diagnostics.log"); var fi = new FileInfo(p); if (fi.Exists && fi.Length > 1_000_000) File.Delete(p); File.AppendAllText(p, $"[{DateTime.Now:HH:mm:ss.fff}] {m}{Environment.NewLine}"); } catch { } }
     private void ScheduleSync() { _syncTimer?.Stop(); _syncTimer?.Start(); }
@@ -365,37 +368,27 @@ public sealed class MainForm : Form
 
         if (_settings.StripBulletPoints)
         {
+            // Remove list wrappers and bullet glyphs, but leave <li> tags so the
+            // block normalization below decides the line breaks uniformly.
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"<li\b[^>]*>", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"</li>", "<br>", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "", RegexOptions.IgnoreCase);
         }
 
-        // Normalize block structure into explicit line breaks so blank lines
-        // survive in every editor, regardless of how the source encodes them.
-        bool hasEmptyBlock = Regex.IsMatch(
-            result,
-            @"<(div|p|h[1-6]|li)\b[^>]*>\s*(?:<br\s*/?>)?\s*</\1>",
-            RegexOptions.IgnoreCase);
-
-        if (hasEmptyBlock)
+        if (_settings.ParagraphGapBlankLines)
         {
-            // Blank lines exist as empty blocks: each closing tag becomes one
-            // line break, so empty blocks naturally add an extra (blank) line
-            // while normal lines stay tight.
-            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
-            result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "<br>", RegexOptions.IgnoreCase);
-        }
-        else
-        {
-            // No empty blocks: the gaps between paragraphs ARE the visual blank
-            // lines, so turn each block boundary into a blank line.
+            // AI-Studio-style: paragraph gaps ARE the blank lines.
             result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>\s*<(div|p|h[1-6]|li)\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
             result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "", RegexOptions.IgnoreCase);
         }
+        else
+        {
+            // Google-style: blank lines come from empty blocks; normal block
+            // boundaries are single line breaks.
+            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "<br>", RegexOptions.IgnoreCase);
+        }
 
-        // Tidy: collapse 3+ breaks to a single blank line, trim the edges.
         result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"(?:\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
