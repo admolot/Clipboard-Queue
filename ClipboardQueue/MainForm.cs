@@ -117,7 +117,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.51";
+        Text = "Clipboard Queue 1.52";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -354,8 +354,6 @@ public sealed class MainForm : Form
         return ApplyFilter(text);
     }
 
-    // Gentle HTML cleanup: keep the source's block structure (natural spacing),
-    // only ensure EMPTY blocks contain a <br> so blank lines survive.
     private string PrepareRichHtml(string html)
     {
         string result = html;
@@ -373,7 +371,34 @@ public sealed class MainForm : Form
             result = Regex.Replace(result, @"(?<=^|>|<br>)[ \t]*(?:[•◦▪‣●○■□◆◇✦✧※]|\*)[ \t]+", "", RegexOptions.IgnoreCase);
         }
 
-        for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<(div|p|h[1-6]|li)(\b[^>]*)>\s*</\1>", "<$1$2><br></$1>", RegexOptions.IgnoreCase); if (b == result) break; }
+        // Normalize block structure into explicit line breaks so blank lines
+        // survive in every editor, regardless of how the source encodes them.
+        bool hasEmptyBlock = Regex.IsMatch(
+            result,
+            @"<(div|p|h[1-6]|li)\b[^>]*>\s*(?:<br\s*/?>)?\s*</\1>",
+            RegexOptions.IgnoreCase);
+
+        if (hasEmptyBlock)
+        {
+            // Blank lines exist as empty blocks: each closing tag becomes one
+            // line break, so empty blocks naturally add an extra (blank) line
+            // while normal lines stay tight.
+            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "<br>", RegexOptions.IgnoreCase);
+        }
+        else
+        {
+            // No empty blocks: the gaps between paragraphs ARE the visual blank
+            // lines, so turn each block boundary into a blank line.
+            result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>\s*<(div|p|h[1-6]|li)\b[^>]*>", "<br><br>", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"<(div|p|h[1-6]|li)\b[^>]*>", "", RegexOptions.IgnoreCase);
+            result = Regex.Replace(result, @"</(div|p|h[1-6]|li)>", "", RegexOptions.IgnoreCase);
+        }
+
+        // Tidy: collapse 3+ breaks to a single blank line, trim the edges.
+        result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
+        result = Regex.Replace(result, @"(?:\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
 
         return ApplyFilterHtml(result);
     }
