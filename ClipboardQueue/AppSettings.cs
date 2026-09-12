@@ -17,6 +17,10 @@ public sealed class AppSettings
     public bool StripBulletPoints { get; set; } = false;
     public bool EnableFilter { get; set; } = true;
     public List<string> FilterWords { get; set; } = new List<string>();
+
+    // false = blank lines only from empty blocks (Google search).
+    // true  = every paragraph/block gap becomes a blank line (AI Studio).
+    public bool ParagraphGapBlankLines { get; set; } = false;
 }
 
 public static class SettingsManager
