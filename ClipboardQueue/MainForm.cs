@@ -118,7 +118,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.55";
+        Text = "Clipboard Queue 1.56";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -317,22 +317,6 @@ public sealed class MainForm : Form
 
         for (int p = 0; p < 6; p++) { string b = result; result = Regex.Replace(result, @"<(em|i)\b[^>]*>(.*?)</\1>", "$2", RegexOptions.IgnoreCase | RegexOptions.Singleline); result = Regex.Replace(result, @"<span\b[^>]*font-style:\s*italic[^>]*>(.*?)</span>", "$1", RegexOptions.IgnoreCase | RegexOptions.Singleline); if (b == result) break; }
 
-        // Heading heuristic: a short standalone block line with no ending
-        // punctuation is treated as a heading and made explicitly bold, so the
-        // boldness survives after we strip its wrapper tag.
-        result = Regex.Replace(
-            result,
-            @"<(div|p|li|h[1-6])\b[^>]*>([^<]{0,60}?)</\1>",
-            m =>
-            {
-                string inner = m.Groups[2].Value;
-                string trimmed = inner.Trim();
-                if (trimmed.Length > 0 && !Regex.IsMatch(trimmed, @"[.!?…]$"))
-                    return "<b>" + inner + "</b><br>";
-                return m.Value;
-            },
-            RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
         if (_settings.StripBulletPoints)
         {
             result = Regex.Replace(result, @"</?(?:ul|ol)\b[^>]*>", "", RegexOptions.IgnoreCase);
@@ -354,6 +338,24 @@ public sealed class MainForm : Form
         result = Regex.Replace(result, @"(?:<br\s*/?>\s*){3,}", "<br><br>", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"(?:\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
+
+        // Heading detection on the FLAT result: any short line with no ending
+        // punctuation that isn't already bold is treated as a heading.
+        var parts = Regex.Split(result, @"(<br\s*/?>)", RegexOptions.IgnoreCase);
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (parts[i].StartsWith("<br", StringComparison.OrdinalIgnoreCase)) continue;
+            string textOnly = Regex.Replace(parts[i], @"<[^>]*>", "");
+            string trimmed = textOnly.Trim();
+            if (trimmed.Length > 0 &&
+                trimmed.Length <= 60 &&
+                !Regex.IsMatch(trimmed, @"[.!?…]$") &&
+                parts[i].IndexOf("<b>", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                parts[i] = "<b>" + parts[i] + "</b>";
+            }
+        }
+        result = string.Concat(parts);
 
         return result;
     }
