@@ -81,6 +81,7 @@ public sealed class MainForm : Form
     private System.Windows.Forms.Timer? _menuConfirmTimer;
     private System.Windows.Forms.Timer? _renderConsumeTimer;
     private uint _lastClipboardSequence;
+    private uint _ownClipboardSequence;
     private uint _menuConfirmSeq;
     private int _confirmStage;
 
@@ -106,8 +107,6 @@ public sealed class MainForm : Form
     private long _confirmConsumedCount;
     private string? _filterPattern;
 
-    private string _lastProgrammaticClipboardText = string.Empty;
-    private DateTime _lastProgrammaticClipboardTime = DateTime.MinValue;
     private string _lastStoredText = string.Empty;
     private string? _lastStoredHtml;
     private DateTime _lastStoredTime = DateTime.MinValue;
@@ -118,7 +117,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.56";
+        Text = "Clipboard Queue 1.57";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -180,6 +179,7 @@ public sealed class MainForm : Form
         RebuildFilterRegex();
         NativeMethods.AddClipboardFormatListener(Handle);
         _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+        _ownClipboardSequence = _lastClipboardSequence;
 
         _clipboardTimer = new System.Windows.Forms.Timer { Interval = 400 }; _clipboardTimer.Tick += (_, _) => OnClipboardUpdate(); _clipboardTimer.Start();
         _syncTimer = new System.Windows.Forms.Timer { Interval = SyncDelayMs }; _syncTimer.Tick += (_, _) => { _syncTimer.Stop(); SyncClipboardOwnership(); };
@@ -187,7 +187,19 @@ public sealed class MainForm : Form
         _renderConsumeTimer = new System.Windows.Forms.Timer { Interval = 250 }; _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
         _menuConfirmTimer = new System.Windows.Forms.Timer { Interval = 400 }; _menuConfirmTimer.Tick += (_, _) => OnMenuConfirmTick();
 
-        try { _keyboardHook = new KeyboardHook { ShouldHandleCtrlV = () => _settings.OverrideCtrlV && GetCount() > 0, ShouldHandleCtrlAltV = () => GetCount() > 0, CtrlVPressed = () => PostToUi(PasteNext), CtrlAltVPressed = () => PostToUi(PasteAll) }; } catch { }
+        try
+        {
+            _keyboardHook = new KeyboardHook
+            {
+                // Never intercept when our OWN window/dialog is focused, so our
+                // own UI (filter dialog etc.) uses normal clipboard paste.
+                ShouldHandleCtrlV = () => !ForegroundIsOwnProcess() && _settings.OverrideCtrlV && GetCount() > 0,
+                ShouldHandleCtrlAltV = () => !ForegroundIsOwnProcess() && GetCount() > 0,
+                CtrlVPressed = () => PostToUi(PasteNext),
+                CtrlAltVPressed = () => PostToUi(PasteAll)
+            };
+        }
+        catch { }
         try { _mouseHook = new MouseHook { LeftClickAfterRightClick = (seq, first) => PostToUi(() => OnLeftClick(seq, first)) }; } catch { }
 
         OnFocusPoll();
@@ -206,6 +218,18 @@ public sealed class MainForm : Form
 
     protected override void OnResize(EventArgs e) { base.OnResize(e); if (WindowState == FormWindowState.Minimized) HideQueueWindow(); }
     protected override void OnFormClosing(FormClosingEventArgs e) { if (!_exitRequested && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideQueueWindow(); base.OnFormClosing(e); return; } Cleanup(); base.OnFormClosing(e); }
+
+    private static bool ForegroundIsOwnProcess()
+    {
+        try
+        {
+            IntPtr fg = NativeMethods.GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+            NativeMethods.GetWindowThreadProcessId(fg, out uint pid);
+            return pid == (uint)Environment.ProcessId;
+        }
+        catch { return false; }
+    }
 
     private void OpenFilterDialog()
     {
@@ -249,7 +273,7 @@ public sealed class MainForm : Form
     private bool ClipboardProtected => DateTime.UtcNow < _protectClipboardUntil;
     private void ProtectClipboard() { _protectClipboardUntil = DateTime.UtcNow.AddMilliseconds(ClipboardProtectMs); }
 
-    private void OnLeftClick(uint seq, bool first) { if (GetCount() == 0 || !_realMode) return; if (first && (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds) StartConfirm(seq, "CUSTOMSELECT"); }
+    private void OnLeftClick(uint seq, bool first) { if (GetCount() == 0 || !_realMode) return; if (ForegroundIsOwnProcess()) return; if (first && (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds) StartConfirm(seq, "CUSTOMSELECT"); }
     private void StartConfirm(uint seq, string tag) { _menuConfirmSeq = seq; _confirmConsumedCount = _consumedCount; _confirmStage = 0; _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Start(); Diag($"{tag} seq={seq}"); }
     private void OnMenuConfirmTick()
     {
@@ -275,6 +299,11 @@ public sealed class MainForm : Form
             if (format == NativeClipboard.CF_UNICODETEXT) NativeClipboard.ProvideData(format, Encoding.Unicode.GetBytes(ApplyFilter(item.Text) + "\0"));
             else if (format == NativeClipboard.CfHtml) NativeClipboard.ProvideData(format, Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             else return;
+
+            // Our own delayed-render write: remember its sequence so we do not
+            // mistake it for a user copy.
+            _ownClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+
             bool pasteRead = known && InputActivity.LastGesture > _armedAt && (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs && DateTime.UtcNow >= _consumeCooldownUntil;
             if (pasteRead) { _renderConsumeTimer?.Stop(); _renderConsumeTimer?.Start(); }
             else { if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600) PostToUi(ScheduleSync); else { _armed = false; Diag("POISON"); } }
@@ -298,7 +327,13 @@ public sealed class MainForm : Form
         ClipItem? head; lock (_sync) { head = _items.Peek(); } if (head == null) return;
         string headText = ApplyFilter(head.Text);
         bool ok = _realMode ? NativeClipboard.TrySetHtmlAndText(headText, HtmlClipboardHelper.CreateHtmlClipboardData(BuildHtmlData(head))) : NativeClipboard.ArmDelayed(Handle);
-        if (ok) { _armed = true; _armedAt = DateTime.UtcNow; _lastArmTime = DateTime.UtcNow; _renderedItem = null; _lastProgrammaticClipboardText = headText; _lastProgrammaticClipboardTime = DateTime.UtcNow; _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber(); Diag($"ARM {(_realMode ? "real" : "delayed")}"); }
+        if (ok)
+        {
+            _armed = true; _armedAt = DateTime.UtcNow; _lastArmTime = DateTime.UtcNow; _renderedItem = null;
+            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+            _ownClipboardSequence = _lastClipboardSequence;
+            Diag($"ARM {(_realMode ? "real" : "delayed")}");
+        }
     }
 
     private string CleanText(string text)
@@ -307,7 +342,6 @@ public sealed class MainForm : Form
         return ApplyFilter(text);
     }
 
-    // Rich-HTML cleanup (used only when the filter is OFF).
     private string PrepareRichHtml(string html)
     {
         string result = html;
@@ -339,8 +373,6 @@ public sealed class MainForm : Form
         result = Regex.Replace(result, @"^\s*(?:<br\s*/?>\s*)+", "", RegexOptions.IgnoreCase);
         result = Regex.Replace(result, @"(?:\s*<br\s*/?>)+\s*$", "", RegexOptions.IgnoreCase);
 
-        // Heading detection on the FLAT result: any short line with no ending
-        // punctuation that isn't already bold is treated as a heading.
         var parts = Regex.Split(result, @"(<br\s*/?>)", RegexOptions.IgnoreCase);
         for (int i = 0; i < parts.Length; i++)
         {
@@ -379,6 +411,10 @@ public sealed class MainForm : Form
             uint cur = NativeMethods.GetClipboardSequenceNumber();
             if (_pauseMonitoring) { _lastClipboardSequence = cur; return; }
             if (cur == _lastClipboardSequence) return;
+
+            // Ignore clipboard changes that WE caused (our own writes/renders).
+            if (cur == _ownClipboardSequence) { _lastClipboardSequence = cur; return; }
+
             if (!Clipboard.ContainsText()) return;
             if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList()) { _armed = false; _lastClipboardSequence = cur; return; }
             string text = Clipboard.GetText(); string? html = null;
@@ -395,8 +431,10 @@ public sealed class MainForm : Form
         text = CleanText(text);
         if (string.IsNullOrWhiteSpace(text)) return;
         if (text.Length > MaxItemLength) return;
-        if (DateTime.UtcNow - _lastProgrammaticClipboardTime < TimeSpan.FromSeconds(2) && text == _lastProgrammaticClipboardText) return;
+
+        // Collapse held-Ctrl+C auto-repeat of the identical content.
         if (text == _lastStoredText && html == _lastStoredHtml && (DateTime.UtcNow - _lastStoredTime).TotalSeconds < RepeatCopyWindowSeconds) { _lastStoredTime = DateTime.UtcNow; return; }
+
         lock (_sync) { _items.Enqueue(new ClipItem(text, html)); Diag($"STORE count={_items.Count}"); }
         _lastStoredText = text; _lastStoredHtml = html; _lastStoredTime = DateTime.UtcNow;
         RefreshUi(); ScheduleSync();
@@ -473,8 +511,10 @@ public sealed class MainForm : Form
             bool ok = NativeClipboard.TrySetHtmlAndText(text, data);
             if (!ok) { var d = new DataObject(); d.SetData(DataFormats.UnicodeText, text); d.SetData(DataFormats.Html, data); ok = await TrySetClipboardAsync(d); }
             if (!ok) return;
+
             ProtectClipboard();
-            _lastProgrammaticClipboardText = text; _lastProgrammaticClipboardTime = DateTime.UtcNow; _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+            _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
+            _ownClipboardSequence = _lastClipboardSequence;
             onSuccess?.Invoke(); RefreshUi();
             await Task.Delay(50);
             if (waitModifiers) NativeMethods.WaitForModifierKeysRelease();
