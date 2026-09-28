@@ -42,11 +42,14 @@ public sealed class MainForm : Form
     private const int MaxItems = 500;
     private const int MaxItemLength = 50_000;
     private const int MaxHtmlLength = 1_000_000;
+    private const int MaxRawHtmlToParse = 2_000_000;
     private const long MaxTotalChars = 20_000_000;
     private const int PreviewLength = 300;
     private const double RepeatCopyWindowSeconds = 2.0;
     private const int SyncDelayMs = 300;
     private const int FocusPollMs = 300;
+    private const int RetryMs = 120;
+    private const int MaxRetries = 5;
     private const double GestureFreshnessMs = 2000;
     private const double ConsumeCooldownMs = 500;
     private const double CustomMenuWindowSeconds = 2.0;
@@ -80,6 +83,8 @@ public sealed class MainForm : Form
     private System.Windows.Forms.Timer? _focusTimer;
     private System.Windows.Forms.Timer? _menuConfirmTimer;
     private System.Windows.Forms.Timer? _renderConsumeTimer;
+    private System.Windows.Forms.Timer? _retryTimer;
+    private int _retryCount;
     private uint _lastClipboardSequence;
     private uint _ownClipboardSequence;
     private uint _menuConfirmSeq;
@@ -87,6 +92,7 @@ public sealed class MainForm : Form
 
     private bool _armed;
     private bool _realMode;
+    private uint _lastFgPid;
     private string _lastFgName = string.Empty;
     private DateTime _armedAt = DateTime.MinValue;
     private DateTime _lastArmTime = DateTime.MinValue;
@@ -107,6 +113,9 @@ public sealed class MainForm : Form
     private long _confirmConsumedCount;
     private string? _filterPattern;
 
+    private long _queueVersion;
+    private long _renderedVersion = -1;
+
     private string _lastStoredText = string.Empty;
     private string? _lastStoredHtml;
     private DateTime _lastStoredTime = DateTime.MinValue;
@@ -117,7 +126,7 @@ public sealed class MainForm : Form
     {
         _settings = SettingsManager.Load();
         _startHidden = startHidden;
-        Text = "Clipboard Queue 1.57";
+        Text = "Clipboard Queue 1.58";
         Width = 800; Height = 500; MinimumSize = new Size(500, 300);
         StartPosition = FormStartPosition.CenterScreen; ShowInTaskbar = false;
 
@@ -182,6 +191,7 @@ public sealed class MainForm : Form
         _ownClipboardSequence = _lastClipboardSequence;
 
         _clipboardTimer = new System.Windows.Forms.Timer { Interval = 400 }; _clipboardTimer.Tick += (_, _) => OnClipboardUpdate(); _clipboardTimer.Start();
+        _retryTimer = new System.Windows.Forms.Timer { Interval = RetryMs }; _retryTimer.Tick += (_, _) => { _retryTimer.Stop(); OnClipboardUpdate(); };
         _syncTimer = new System.Windows.Forms.Timer { Interval = SyncDelayMs }; _syncTimer.Tick += (_, _) => { _syncTimer.Stop(); SyncClipboardOwnership(); };
         _focusTimer = new System.Windows.Forms.Timer { Interval = FocusPollMs }; _focusTimer.Tick += (_, _) => OnFocusPoll(); _focusTimer.Start();
         _renderConsumeTimer = new System.Windows.Forms.Timer { Interval = 250 }; _renderConsumeTimer.Tick += (_, _) => ConsumeRenderedItem();
@@ -191,8 +201,6 @@ public sealed class MainForm : Form
         {
             _keyboardHook = new KeyboardHook
             {
-                // Never intercept when our OWN window/dialog is focused, so our
-                // own UI (filter dialog etc.) uses normal clipboard paste.
                 ShouldHandleCtrlV = () => !ForegroundIsOwnProcess() && _settings.OverrideCtrlV && GetCount() > 0,
                 ShouldHandleCtrlAltV = () => !ForegroundIsOwnProcess() && GetCount() > 0,
                 CtrlVPressed = () => PostToUi(PasteNext),
@@ -249,17 +257,19 @@ public sealed class MainForm : Form
 
     private void OnFocusPoll()
     {
-        string name = GetForegroundProcessName();
-        if (name == _lastFgName) return;
-        _lastFgName = name;
-        bool real = _settings.RealDataApps != null && _settings.RealDataApps.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
-        if (real != _realMode || !_armed) { _realMode = real; Diag($"MODE {(real ? "real" : "delayed")} app={name}"); SyncClipboardOwnership(); }
-    }
-
-    private static string GetForegroundProcessName()
-    {
-        try { IntPtr fg = NativeMethods.GetForegroundWindow(); if (fg == IntPtr.Zero) return string.Empty; NativeMethods.GetWindowThreadProcessId(fg, out uint pid); return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; }
-        catch { return string.Empty; }
+        try
+        {
+            IntPtr fg = NativeMethods.GetForegroundWindow();
+            if (fg == IntPtr.Zero) return;
+            NativeMethods.GetWindowThreadProcessId(fg, out uint pid);
+            if (pid == _lastFgPid) return;          // cheap: only resolve name on change
+            _lastFgPid = pid;
+            string name = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
+            _lastFgName = name;
+            bool real = _settings.RealDataApps != null && _settings.RealDataApps.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+            if (real != _realMode || !_armed) { _realMode = real; Diag($"MODE {(real ? "real" : "delayed")} app={name}"); SyncClipboardOwnership(); }
+        }
+        catch { }
     }
 
     private void SetLogging(bool v) { if (_settings.Diagnostics == v) return; _settings.Diagnostics = v; SettingsManager.Save(_settings); if (v) Diag("LOGGING ON"); }
@@ -272,6 +282,68 @@ public sealed class MainForm : Form
     private void ScheduleSync() { _syncTimer?.Stop(); _syncTimer?.Start(); }
     private bool ClipboardProtected => DateTime.UtcNow < _protectClipboardUntil;
     private void ProtectClipboard() { _protectClipboardUntil = DateTime.UtcNow.AddMilliseconds(ClipboardProtectMs); }
+
+    private void ScheduleRetry()
+    {
+        if (_retryCount >= MaxRetries) { _retryCount = 0; return; }
+        _retryCount++;
+        _retryTimer?.Stop();
+        _retryTimer?.Start();
+    }
+
+    private void OnClipboardUpdate()
+    {
+        try
+        {
+            uint cur = NativeMethods.GetClipboardSequenceNumber();
+            if (_pauseMonitoring) { _lastClipboardSequence = cur; _retryCount = 0; return; }
+            if (cur == _lastClipboardSequence) return;
+            if (cur == _ownClipboardSequence) { _lastClipboardSequence = cur; _retryCount = 0; return; }
+
+            string text;
+            string? rawHtml = null;
+            try
+            {
+                if (!Clipboard.ContainsText()) { ScheduleRetry(); return; }   // source still writing
+                if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList()) { _armed = false; _lastClipboardSequence = cur; _retryCount = 0; return; }
+                text = Clipboard.GetText();
+                try { if (Clipboard.ContainsText(TextDataFormat.Html)) rawHtml = Clipboard.GetText(TextDataFormat.Html); } catch { rawHtml = null; }
+            }
+            catch
+            {
+                ScheduleRetry();   // clipboard locked by another app; try again shortly
+                return;
+            }
+
+            _lastClipboardSequence = cur;
+            _retryCount = 0;
+
+            if (string.IsNullOrWhiteSpace(text)) return;
+
+            if (rawHtml != null && rawHtml.Length <= MaxRawHtmlToParse)
+            {
+                string raw = rawHtml;
+                Task.Run(() =>
+                {
+                    string? parsed = null;
+                    try
+                    {
+                        parsed = HtmlClipboardHelper.ExtractFragment(raw);
+                        if (parsed != null) parsed = HtmlClipboardHelper.NormalizeLineBreaks(parsed);
+                        if (parsed != null && parsed.Length > MaxHtmlLength) parsed = null;
+                    }
+                    catch { parsed = null; }
+                    string? p = parsed;
+                    PostToUi(() => AddClipboardItem(text, p));
+                });
+            }
+            else
+            {
+                AddClipboardItem(text, null);
+            }
+        }
+        catch { }
+    }
 
     private void OnLeftClick(uint seq, bool first) { if (GetCount() == 0 || !_realMode) return; if (ForegroundIsOwnProcess()) return; if (first && (DateTime.UtcNow - InputActivity.LastRightButtonUp).TotalSeconds < CustomMenuWindowSeconds) StartConfirm(seq, "CUSTOMSELECT"); }
     private void StartConfirm(uint seq, string tag) { _menuConfirmSeq = seq; _confirmConsumedCount = _consumedCount; _confirmStage = 0; _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Start(); Diag($"{tag} seq={seq}"); }
@@ -286,7 +358,7 @@ public sealed class MainForm : Form
         if (head == null || clip == null || clip != head) { _menuConfirmTimer?.Stop(); return; }
         _menuConfirmTimer?.Stop(); ConsumeHead();
     }
-    private void ConsumeHead() { lock (_sync) { if (_items.Count > 0) { _items.Dequeue(); _consumedCount++; Diag($"CONSUME confirm count={_items.Count}"); } } RefreshUi(); ScheduleSync(); }
+    private void ConsumeHead() { lock (_sync) { if (_items.Count > 0) { _items.Dequeue(); _consumedCount++; _queueVersion++; Diag($"CONSUME confirm count={_items.Count}"); } } RefreshUi(); ScheduleSync(); }
 
     private void HandleRenderFormat(uint format)
     {
@@ -299,11 +371,7 @@ public sealed class MainForm : Form
             if (format == NativeClipboard.CF_UNICODETEXT) NativeClipboard.ProvideData(format, Encoding.Unicode.GetBytes(ApplyFilter(item.Text) + "\0"));
             else if (format == NativeClipboard.CfHtml) NativeClipboard.ProvideData(format, Encoding.UTF8.GetBytes(BuildHtmlData(item) + "\0"));
             else return;
-
-            // Our own delayed-render write: remember its sequence so we do not
-            // mistake it for a user copy.
             _ownClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
-
             bool pasteRead = known && InputActivity.LastGesture > _armedAt && (DateTime.UtcNow - InputActivity.LastGesture).TotalMilliseconds < GestureFreshnessMs && DateTime.UtcNow >= _consumeCooldownUntil;
             if (pasteRead) { _renderConsumeTimer?.Stop(); _renderConsumeTimer?.Start(); }
             else { if ((DateTime.UtcNow - _lastArmTime).TotalMilliseconds > 600) PostToUi(ScheduleSync); else { _armed = false; Diag("POISON"); } }
@@ -316,7 +384,7 @@ public sealed class MainForm : Form
         _renderConsumeTimer?.Stop();
         var r = _renderedItem; if (r == null) return;
         _renderedItem = null; _consumeCooldownUntil = DateTime.UtcNow.AddMilliseconds(ConsumeCooldownMs);
-        lock (_sync) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), r)) { _items.Dequeue(); _consumedCount++; Diag($"CONSUME render count={_items.Count}"); } }
+        lock (_sync) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), r)) { _items.Dequeue(); _consumedCount++; _queueVersion++; Diag($"CONSUME render count={_items.Count}"); } }
         RefreshUi(); ScheduleSync();
     }
 
@@ -379,13 +447,8 @@ public sealed class MainForm : Form
             if (parts[i].StartsWith("<br", StringComparison.OrdinalIgnoreCase)) continue;
             string textOnly = Regex.Replace(parts[i], @"<[^>]*>", "");
             string trimmed = textOnly.Trim();
-            if (trimmed.Length > 0 &&
-                trimmed.Length <= 60 &&
-                !Regex.IsMatch(trimmed, @"[.!?…]$") &&
-                parts[i].IndexOf("<b>", StringComparison.OrdinalIgnoreCase) < 0)
-            {
+            if (trimmed.Length > 0 && trimmed.Length <= 60 && !Regex.IsMatch(trimmed, @"[.!?…]$") && parts[i].IndexOf("<b>", StringComparison.OrdinalIgnoreCase) < 0)
                 parts[i] = "<b>" + parts[i] + "</b>";
-            }
         }
         result = string.Concat(parts);
 
@@ -394,9 +457,7 @@ public sealed class MainForm : Form
 
     private string BuildHtmlData(ClipItem item)
     {
-        if (_settings.EnableFilter)
-            return HtmlClipboardHelper.PlainTextToHtml(ApplyFilter(item.Text));
-
+        if (_settings.EnableFilter) return HtmlClipboardHelper.PlainTextToHtml(ApplyFilter(item.Text));
         if (!string.IsNullOrWhiteSpace(item.Html)) return PrepareRichHtml(item.Html);
         if (_settings.RenderMarkdownForPlainText) return Markdown.ToHtml(item.Text, MarkdownPipeline);
         return HtmlClipboardHelper.PlainTextToHtml(item.Text);
@@ -404,38 +465,14 @@ public sealed class MainForm : Form
 
     private static long SizeOf(ClipItem item) => item.Text.Length + (item.Html?.Length ?? 0);
 
-    private void OnClipboardUpdate()
-    {
-        try
-        {
-            uint cur = NativeMethods.GetClipboardSequenceNumber();
-            if (_pauseMonitoring) { _lastClipboardSequence = cur; return; }
-            if (cur == _lastClipboardSequence) return;
-
-            // Ignore clipboard changes that WE caused (our own writes/renders).
-            if (cur == _ownClipboardSequence) { _lastClipboardSequence = cur; return; }
-
-            if (!Clipboard.ContainsText()) return;
-            if (Clipboard.ContainsImage() || Clipboard.ContainsFileDropList()) { _armed = false; _lastClipboardSequence = cur; return; }
-            string text = Clipboard.GetText(); string? html = null;
-            try { if (Clipboard.ContainsText(TextDataFormat.Html)) { string raw = Clipboard.GetText(TextDataFormat.Html); html = HtmlClipboardHelper.ExtractFragment(raw); if (html != null) { html = HtmlClipboardHelper.NormalizeLineBreaks(html); if (html.Length > MaxHtmlLength) html = null; } } } catch { html = null; }
-            _lastClipboardSequence = cur;
-            AddClipboardItem(text, html);
-        }
-        catch { }
-    }
-
     private void AddClipboardItem(string text, string? html)
     {
         if (_pauseMonitoring) return;
         text = CleanText(text);
         if (string.IsNullOrWhiteSpace(text)) return;
         if (text.Length > MaxItemLength) return;
-
-        // Collapse held-Ctrl+C auto-repeat of the identical content.
         if (text == _lastStoredText && html == _lastStoredHtml && (DateTime.UtcNow - _lastStoredTime).TotalSeconds < RepeatCopyWindowSeconds) { _lastStoredTime = DateTime.UtcNow; return; }
-
-        lock (_sync) { _items.Enqueue(new ClipItem(text, html)); Diag($"STORE count={_items.Count}"); }
+        lock (_sync) { _items.Enqueue(new ClipItem(text, html)); _queueVersion++; Diag($"STORE count={_items.Count}"); }
         _lastStoredText = text; _lastStoredHtml = html; _lastStoredTime = DateTime.UtcNow;
         RefreshUi(); ScheduleSync();
     }
@@ -444,14 +481,20 @@ public sealed class MainForm : Form
     private int GetCount() { lock (_sync) return _items.Count; }
     private void SetPauseMonitoring(bool v) { if (_updatingPause) return; _updatingPause = true; _pauseMonitoring = v; _pauseCheckBox.Checked = v; _pauseMenuItem.Checked = v; _updatingPause = false; }
     private void SetStartWithWindows(bool v) { if (_updatingStartup) return; _updatingStartup = true; StartupManager.SetEnabled(v); bool en = StartupManager.IsEnabled(); _startupCheckBox.Checked = en; _startupMenuItem.Checked = en; _updatingStartup = false; }
-    private void ShowQueueWindow() { Show(); ShowInTaskbar = true; WindowState = FormWindowState.Normal; Activate(); _suppressCounter = true; RefreshUi(); }
+    private void ShowQueueWindow() { Show(); ShowInTaskbar = true; WindowState = FormWindowState.Normal; Activate(); _suppressCounter = true; _renderedVersion = -1; RefreshUi(); }
     private void HideQueueWindow() { Hide(); ShowInTaskbar = false; }
 
     private void RefreshUi()
     {
         ClipItem[] items;
-        lock (_sync) { while (_items.Count > MaxItems) _items.Dequeue(); long tot = 0; foreach (var it in _items) tot += SizeOf(it); while (tot > MaxTotalChars && _items.Count > 0) { var o = _items.Dequeue(); tot -= SizeOf(o); } items = _items.ToArray(); }
-        if (Visible) RebuildList(items);
+        lock (_sync)
+        {
+            while (_items.Count > MaxItems) { _items.Dequeue(); _queueVersion++; }
+            long tot = 0; foreach (var it in _items) tot += SizeOf(it);
+            while (tot > MaxTotalChars && _items.Count > 0) { var o = _items.Dequeue(); tot -= SizeOf(o); _queueVersion++; }
+            items = _items.ToArray();
+        }
+        if (Visible && _queueVersion != _renderedVersion) { RebuildList(items); _renderedVersion = _queueVersion; }
         _countLabel.Text = $"{items.Length} item(s)";
         string tip = $"Clipboard Queue: {items.Length} item(s)"; if (tip.Length > 127) tip = tip[..127];
         _notifyIcon.Text = tip;
@@ -466,15 +509,15 @@ public sealed class MainForm : Form
     {
         if (_listView.SelectedIndices.Count == 0) return;
         var sel = _listView.SelectedIndices.Cast<int>().ToHashSet();
-        lock (_sync) { var cur = _items.ToArray(); _items.Clear(); for (int i = 0; i < cur.Length; i++) if (!sel.Contains(i)) _items.Enqueue(cur[i]); }
+        lock (_sync) { var cur = _items.ToArray(); _items.Clear(); for (int i = 0; i < cur.Length; i++) if (!sel.Contains(i)) _items.Enqueue(cur[i]); _queueVersion++; }
         RefreshUi(); ScheduleSync();
     }
-    private void ClearAll() { lock (_sync) _items.Clear(); RefreshUi(); ScheduleSync(); }
+    private void ClearAll() { lock (_sync) { _items.Clear(); _queueVersion++; } RefreshUi(); ScheduleSync(); }
 
     private async void PasteNext()
     {
         if (_pasteBusy) return; _pasteBusy = true;
-        try { ClipItem? it; lock (_sync) it = _items.Count > 0 ? _items.Peek() : null; if (it == null) return; await PasteRichAsync(it.Text, it.Html, false, () => { lock (_sync) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), it)) { _items.Dequeue(); _consumedCount++; Diag($"CONSUME key count={_items.Count}"); } } }); }
+        try { ClipItem? it; lock (_sync) it = _items.Count > 0 ? _items.Peek() : null; if (it == null) return; await PasteRichAsync(it.Text, it.Html, false, () => { lock (_sync) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), it)) { _items.Dequeue(); _consumedCount++; _queueVersion++; Diag($"CONSUME key count={_items.Count}"); } } }); }
         finally { _pasteBusy = false; }
     }
 
@@ -486,7 +529,7 @@ public sealed class MainForm : Form
             ClipItem[] items; lock (_sync) { if (_items.Count == 0) return; items = _items.ToArray(); }
             string sep = string.IsNullOrEmpty(_settings.PasteAllSeparator) ? Environment.NewLine + Environment.NewLine : _settings.PasteAllSeparator;
             var comb = await Task.Run(() => { var tb = new StringBuilder(); var hb = new StringBuilder(); for (int i = 0; i < items.Length; i++) { tb.Append(items[i].Text); hb.Append(BuildHtmlData(items[i])); if (i < items.Length - 1) { tb.Append(sep); hb.Append("<br><br>"); } } return (Text: tb.ToString(), Html: hb.ToString()); });
-            await PasteRichAsync(comb.Text, comb.Html, true, () => { lock (_sync) { for (int i = 0; i < items.Length; i++) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i])) { _items.Dequeue(); _consumedCount++; } else break; } Diag($"CONSUME pasteall count={_items.Count}"); } });
+            await PasteRichAsync(comb.Text, comb.Html, true, () => { lock (_sync) { for (int i = 0; i < items.Length; i++) { if (_items.Count > 0 && ReferenceEquals(_items.Peek(), items[i])) { _items.Dequeue(); _consumedCount++; _queueVersion++; } else break; } Diag($"CONSUME pasteall count={_items.Count}"); } });
         }
         finally { _pasteBusy = false; }
     }
@@ -496,22 +539,16 @@ public sealed class MainForm : Form
         try
         {
             text = ApplyFilter(text);
-
             string htmlToUse;
-            if (_settings.EnableFilter)
-                htmlToUse = HtmlClipboardHelper.PlainTextToHtml(text);
-            else if (!string.IsNullOrWhiteSpace(html))
-                htmlToUse = PrepareRichHtml(html);
-            else if (_settings.RenderMarkdownForPlainText)
-                htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
-            else
-                htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
+            if (_settings.EnableFilter) htmlToUse = HtmlClipboardHelper.PlainTextToHtml(text);
+            else if (!string.IsNullOrWhiteSpace(html)) htmlToUse = PrepareRichHtml(html);
+            else if (_settings.RenderMarkdownForPlainText) htmlToUse = await Task.Run(() => Markdown.ToHtml(text, MarkdownPipeline));
+            else htmlToUse = await Task.Run(() => HtmlClipboardHelper.PlainTextToHtml(text));
 
             string data = HtmlClipboardHelper.CreateHtmlClipboardData(htmlToUse);
             bool ok = NativeClipboard.TrySetHtmlAndText(text, data);
             if (!ok) { var d = new DataObject(); d.SetData(DataFormats.UnicodeText, text); d.SetData(DataFormats.Html, data); ok = await TrySetClipboardAsync(d); }
             if (!ok) return;
-
             ProtectClipboard();
             _lastClipboardSequence = NativeMethods.GetClipboardSequenceNumber();
             _ownClipboardSequence = _lastClipboardSequence;
@@ -532,7 +569,7 @@ public sealed class MainForm : Form
     {
         if (_cleanedUp) return; _cleanedUp = true;
         try { if (IsHandleCreated) NativeMethods.RemoveClipboardFormatListener(Handle); } catch { }
-        try { _clipboardTimer?.Stop(); _clipboardTimer?.Dispose(); _syncTimer?.Stop(); _syncTimer?.Dispose(); _focusTimer?.Stop(); _focusTimer?.Dispose(); _renderConsumeTimer?.Stop(); _renderConsumeTimer?.Dispose(); _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Dispose(); } catch { }
+        try { _clipboardTimer?.Stop(); _clipboardTimer?.Dispose(); _retryTimer?.Stop(); _retryTimer?.Dispose(); _syncTimer?.Stop(); _syncTimer?.Dispose(); _focusTimer?.Stop(); _focusTimer?.Dispose(); _renderConsumeTimer?.Stop(); _renderConsumeTimer?.Dispose(); _menuConfirmTimer?.Stop(); _menuConfirmTimer?.Dispose(); } catch { }
         _keyboardHook?.Dispose(); _mouseHook?.Dispose(); _cursorCounter?.Dispose();
         try { _notifyIcon.Visible = false; _notifyIcon.Dispose(); } catch { }
     }
